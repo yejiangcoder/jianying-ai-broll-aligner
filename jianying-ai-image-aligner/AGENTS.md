@@ -55,6 +55,8 @@ Planned v0.2:
 - no fixed `1.3s` default
 - still writes the independent `AI_BROLL` image track
 
+v0.2 is not implemented yet. Desktop Codex must not assume `visual_slot_plan` execution works until IDEA Codex implements it.
+
 `agent_inputs.json` may contain local project paths.
 For portable usage, create `agent_inputs.example.json` and keep local paths out of OSS export.
 
