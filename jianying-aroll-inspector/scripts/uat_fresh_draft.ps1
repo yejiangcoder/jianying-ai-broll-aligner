@@ -3,6 +3,9 @@ param(
   [string]$RunRoot = "",
   [ValidateSet("auto", "deterministic-baseline", "semantic-requests-only", "deepseek", "fail-closed", "default")]
   [string]$SemanticMode = "auto",
+  [string]$ReadyRunDir = "",
+  [ValidateSet("minimal", "standard", "debug")]
+  [string]$ReportProfile = "standard",
   [switch]$Commit
 )
 
@@ -16,10 +19,18 @@ function Get-DefaultRuntimeRoot {
 }
 
 function Read-JsonFile([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) {
+  $resolvedPath = $Path
+  if (-not (Test-Path -LiteralPath $resolvedPath)) {
+    $gzPath = "$Path.gz"
+    if (Test-Path -LiteralPath $gzPath) {
+      $resolvedPath = $gzPath
+    }
+  }
+  if (-not (Test-Path -LiteralPath $resolvedPath)) {
     throw "Required report missing: $Path"
   }
   $helper = @'
+import gzip
 import json
 import sys
 
@@ -47,7 +58,8 @@ def normalize(obj):
 
 
 path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
+open_fn = gzip.open if path.endswith(".gz") else open
+with open_fn(path, "rt", encoding="utf-8") as f:
     payload = json.load(f)
 
 print(json.dumps(normalize(payload), ensure_ascii=False))
@@ -55,7 +67,7 @@ print(json.dumps(normalize(payload), ensure_ascii=False))
   $tmp = Join-Path $env:TEMP "read_json_case_safe.py"
   Set-Content -Path $tmp -Value $helper -Encoding UTF8
   try {
-    $jsonText = & py -3 $tmp $Path
+    $jsonText = & py -3 $tmp $resolvedPath
     return $jsonText | ConvertFrom-Json
   } finally {
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
@@ -98,6 +110,9 @@ function Resolve-JianyingInstallDir {
     if ($parent) {
       $roots += $parent
     }
+  }
+  if ($env:ProgramFiles) {
+    $roots += (Join-Path $env:ProgramFiles "JianyingPro")
   }
   $roots = $roots | Where-Object { $_ } | Select-Object -Unique
 
@@ -165,25 +180,34 @@ if ([string]::IsNullOrWhiteSpace($RunRoot)) {
 }
 Sync-JyDraftcEnv
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDir = Join-Path $RunRoot ("v21_fresh_draft_uat_" + $timestamp)
-New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-
-$dryArgs = @(
-  "-m", "aroll_v21.cli",
-  "--mode", "dry-run",
-  "--draft-dir", $DraftDir,
-  "--output-dir", $runDir,
-  "--semantic-mode", $SemanticMode
-)
-
-Push-Location $repoRoot
-try {
-  & py -3 @dryArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "V21 dry-run command failed with exit code $LASTEXITCODE"
+$runDir = ""
+if (-not [string]::IsNullOrWhiteSpace($ReadyRunDir)) {
+  $runDir = $ReadyRunDir
+  if (-not (Test-Path -LiteralPath $runDir)) {
+    throw "ReadyRunDir does not exist: $runDir"
   }
-} finally {
-  Pop-Location
+} else {
+  $runDir = Join-Path $RunRoot ("v21_fresh_draft_uat_" + $timestamp)
+  New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+
+  $dryArgs = @(
+    "-m", "aroll_v21.cli",
+    "--mode", "dry-run",
+    "--draft-dir", $DraftDir,
+    "--output-dir", $runDir,
+    "--semantic-mode", $SemanticMode,
+    "--report-profile", $ReportProfile
+  )
+
+  Push-Location $repoRoot
+  try {
+    & py -3 @dryArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "V21 dry-run command failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
 }
 
 $summary = Read-JsonFile (Join-Path $runDir "run_summary.json")
@@ -231,6 +255,8 @@ $writeSummary = $null
     "--draft-dir", $DraftDir,
     "--output-dir", $writeRunDir,
     "--semantic-mode", $SemanticMode,
+    "--report-profile", $ReportProfile,
+    "--ready-run-dir", $runDir,
     "--allow-sacrificial-write-without-postwrite-decrypt",
     "--commit"
   )

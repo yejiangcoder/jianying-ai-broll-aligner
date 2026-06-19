@@ -11,7 +11,7 @@ from tests.test_aroll_v21_caption_template_round7_fingerprint_sample import _rou
 class ArollV21CaptionTemplateStableStyleFingerprintTests(unittest.TestCase):
     def test_round7_volatile_text_keyword_word_and_id_fields_do_not_change_fingerprint(self) -> None:
         material_a = _round7_material("material_a", "就国南能不能不要规训自己人呐", keyword=True)
-        material_b = _round7_material("material_b", "你嘲笑样例角色甲是对自己人", keyword=False)
+        material_b = _round7_material("material_b", "你嘲笑嘉豪是对自己人", keyword=False)
         segment_a = _round7_segment("material_a", 1)
         segment_b = _round7_segment("material_b", 99)
 

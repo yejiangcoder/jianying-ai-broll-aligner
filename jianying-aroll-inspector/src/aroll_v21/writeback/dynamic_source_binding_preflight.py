@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from jy_bridge import DEFAULT_JY_DRAFTC, root_mirrors_timeline_id
+from jy_bridge import DEFAULT_JY_DRAFTC
+from aroll_root_mirror import root_mirror_report_from_exception, root_mirrors_timeline_id
 
 from aroll_v21.ingest.real_draft_adapter import RealDraftIngestResult
 from aroll_v21.ir.models import Blocker, RunReport
@@ -149,6 +151,12 @@ class DynamicSourceBindingPreflight:
         try:
             required = bool(self.root_mirror_func(Path(draft_dir), self.jy_draftc, Path(run_dir or ""), timeline_id))
         except Exception as exc:
+            detection_report = root_mirror_report_from_exception(
+                exc,
+                Path(draft_dir),
+                timeline_id,
+            )
+            self._write_root_mirror_detection_report(Path(run_dir or ""), detection_report)
             raise PreflightError(
                 "V21_WRITEBACK_ROOT_MIRROR_DETECTION_FAILED",
                 "root mirror requirement could not be determined safely",
@@ -158,6 +166,7 @@ class DynamicSourceBindingPreflight:
                     "root_mirror_error": str(exc),
                     "root_mirror_synced": False,
                     "root_mirror_targets": [],
+                    "root_mirror_detection_report": detection_report,
                 },
             ) from exc
         return {
@@ -167,6 +176,18 @@ class DynamicSourceBindingPreflight:
             "root_mirror_synced": False,
             "root_mirror_targets": [str(Path(draft_dir) / "draft_content.json"), str(Path(draft_dir) / "template-2.tmp")] if required else [],
         }
+
+    def _write_root_mirror_detection_report(self, run_dir: Path, report: dict[str, Any]) -> None:
+        if not str(run_dir):
+            return
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "root_mirror_detection_report.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError as exc:
+            report["report_write_error"] = str(exc)
 
     def _select_video_track_id_from_templates(self, used_templates: list[dict[str, Any]], run_report: RunReport) -> str:
         if not used_templates or len(used_templates) != len(run_report.final_timeline):

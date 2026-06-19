@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import tempfile
 import unittest
@@ -57,6 +58,12 @@ def add_selected_track_callout(result) -> None:
 
 
 def read_json(path: Path):
+    if path.exists():
+        return json.loads(path.read_text("utf-8"))
+    gzip_path = path.with_suffix(path.suffix + ".gz")
+    if gzip_path.exists():
+        with gzip.open(gzip_path, "rt", encoding="utf-8") as f:
+            return json.load(f)
     return json.loads(path.read_text("utf-8"))
 
 

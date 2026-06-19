@@ -30,6 +30,13 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+function Get-DefaultRuntimeRoot {
+  if ($env:AUTO_CLIP_RUNTIME_DIR) {
+    return [string]$env:AUTO_CLIP_RUNTIME_DIR
+  }
+  return (Join-Path $HOME ".auto_clip_runtime")
+}
+
 function Resolve-ExistingPath([string]$PathValue, [string]$Label) {
   if (-not $PathValue) {
     throw "$Label is empty"
@@ -48,13 +55,6 @@ function Get-DefaultJyDraftc {
     return [string]$env:JY_DRAFTC_EXE
   }
   return ""
-}
-
-function Get-DefaultRuntimeRoot {
-  if ($env:AUTO_CLIP_RUNTIME_DIR) {
-    return [string]$env:AUTO_CLIP_RUNTIME_DIR
-  }
-  return (Join-Path $HOME ".auto_clip_runtime")
 }
 
 function Invoke-RepoPython([string[]]$Arguments) {
@@ -150,13 +150,13 @@ if (-not (Test-Path -LiteralPath $analyzer)) {
 }
 
 $draftDirResolved = Resolve-ExistingPath $DraftDir "DraftDir"
-if ([string]::IsNullOrWhiteSpace($RunRoot)) {
-  $RunRoot = Join-Path (Get-DefaultRuntimeRoot) "draft_rollback_runs"
-}
 if (-not $JyDraftc) {
   $JyDraftc = Get-DefaultJyDraftc
 }
 $jyDraftcResolved = Resolve-ExistingPath $JyDraftc "JyDraftc"
+if ([string]::IsNullOrWhiteSpace($RunRoot)) {
+  $RunRoot = Join-Path (Get-DefaultRuntimeRoot) "draft_rollback_runs"
+}
 $backupRoot = Join-Path $draftDirResolved ".backup"
 if (-not (Test-Path -LiteralPath $backupRoot)) {
   throw "Draft backup directory does not exist: $backupRoot"

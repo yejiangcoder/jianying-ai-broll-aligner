@@ -32,6 +32,26 @@ class SemanticAdjudicationReportBuilder:
     provider_skipped_reasons: dict[str, int] = field(default_factory=dict)
     provider_error: str = ""
     semantic_decision_cache_used: bool = False
+    deepseek_batch_enabled: bool = False
+    deepseek_batch_request_count: int = 0
+    deepseek_batch_attempt_count: int = 0
+    deepseek_batch_retry_count: int = 0
+    deepseek_batch_issue_count: int = 0
+    deepseek_batch_resolved_count: int = 0
+    deepseek_batch_unresolved_count: int = 0
+    deepseek_batch_missing_issue_ids: list[str] = field(default_factory=list)
+    deepseek_batch_unknown_issue_ids: list[str] = field(default_factory=list)
+    deepseek_batch_error: str = ""
+    deepseek_batch_chunk_count: int = 0
+    deepseek_batch_chunk_sizes: list[int] = field(default_factory=list)
+    deepseek_batch_request: dict[str, Any] = field(default_factory=dict)
+    deepseek_batch_response: dict[str, Any] = field(default_factory=dict)
+    deepseek_batch_error_payload: dict[str, Any] = field(default_factory=dict)
+    commit_reused_semantic_cache: bool = False
+    semantic_cache_input_hash: str = ""
+    semantic_cache_issue_count: int = 0
+    semantic_cache_resolved_count: int = 0
+    semantic_cache_unresolved_count: int = 0
     routing_decisions: list[SemanticRoutingDecision] = field(default_factory=list)
     requests: list[SemanticAdjudicationRequest] = field(default_factory=list)
     decisions: list[SemanticAdjudicationDecision] = field(default_factory=list)
@@ -85,9 +105,29 @@ class SemanticAdjudicationReportBuilder:
             "deepseek_provider_configured": bool(self.provider_configured),
             "deepseek_provider_called_count": int(self.provider_called_count),
             "deepseek_provider_error": str(self.provider_error or ""),
+            "deepseek_batch_enabled": bool(self.deepseek_batch_enabled),
+            "deepseek_batch_request_count": int(self.deepseek_batch_request_count),
+            "deepseek_batch_attempt_count": int(self.deepseek_batch_attempt_count),
+            "deepseek_batch_retry_count": int(self.deepseek_batch_retry_count),
+            "deepseek_batch_issue_count": int(self.deepseek_batch_issue_count),
+            "deepseek_batch_resolved_count": int(self.deepseek_batch_resolved_count),
+            "deepseek_batch_unresolved_count": int(self.deepseek_batch_unresolved_count),
+            "deepseek_batch_missing_issue_ids": list(self.deepseek_batch_missing_issue_ids),
+            "deepseek_batch_unknown_issue_ids": list(self.deepseek_batch_unknown_issue_ids),
+            "deepseek_batch_error": str(self.deepseek_batch_error or ""),
+            "deepseek_batch_chunk_count": int(self.deepseek_batch_chunk_count),
+            "deepseek_batch_chunk_sizes": list(self.deepseek_batch_chunk_sizes),
+            "deepseek_batch_request": dict(self.deepseek_batch_request),
+            "deepseek_batch_response": dict(self.deepseek_batch_response),
+            "deepseek_batch_error_payload": dict(self.deepseek_batch_error_payload),
             "deepseek_provider_skipped_count": int(self.provider_skipped_count),
             "deepseek_provider_skipped_reasons": dict(sorted(self.provider_skipped_reasons.items())),
             "semantic_decision_cache_used": bool(self.semantic_decision_cache_used),
+            "commit_reused_semantic_cache": bool(self.commit_reused_semantic_cache),
+            "semantic_cache_input_hash": str(self.semantic_cache_input_hash or ""),
+            "semantic_cache_issue_count": int(self.semantic_cache_issue_count),
+            "semantic_cache_resolved_count": int(self.semantic_cache_resolved_count),
+            "semantic_cache_unresolved_count": int(self.semantic_cache_unresolved_count),
             "deterministic_baseline_refused_count": int(self.deterministic_baseline_refused_count),
             "semantic_auto_route_count": len(self.routing_decisions),
             "semantic_local_decision_count": int(self.local_decision_count),

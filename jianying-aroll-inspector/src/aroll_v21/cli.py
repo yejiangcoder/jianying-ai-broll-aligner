@@ -16,6 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", "--run-dir", dest="run_dir", type=Path, required=True)
     parser.add_argument("--mode", choices=["dry-run", "write", "verify-only"], default="dry-run")
     parser.add_argument("--postwrite-materials-json", type=Path)
+    parser.add_argument("--ready-run-dir", type=Path)
+    parser.add_argument("--report-profile", choices=["minimal", "standard", "debug"], default="standard")
     parser.add_argument(
         "--semantic-mode",
         choices=["auto", "deterministic-baseline", "semantic-requests-only", "deepseek", "fail-closed", "default"],
@@ -45,6 +47,8 @@ def main() -> int:
                 args.allow_sacrificial_write_without_postwrite_decrypt
             ),
             semantic_mode=str(args.semantic_mode or "default"),
+            ready_run_dir=args.ready_run_dir,
+            report_profile=args.report_profile,
         )
     )
     print(f"status={summary.get('status')}")

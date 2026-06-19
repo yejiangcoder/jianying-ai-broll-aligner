@@ -95,7 +95,7 @@ class ArollV21QualityAlgorithmPortsTests(unittest.TestCase):
                 (ROOT / "src" / "aroll_v21" / "quality" / "visual_pacing.py").read_text("utf-8"),
             ]
         )
-        for forbidden in ("6月15日", "6月16日", "样例角色甲", "随意", "肆意", "这说明", "safe_cut_boundary_resolver"):
+        for forbidden in ("6月15日", "6月16日", "嘉豪", "随意", "肆意", "这说明", "safe_cut_boundary_resolver"):
             self.assertNotIn(forbidden, source)
 
     def test_v20_safe_boundary_whole_word_guard_ported(self) -> None:
@@ -153,7 +153,7 @@ class ArollV21QualityAlgorithmPortsTests(unittest.TestCase):
             self.assertIn(target, manifest)
         self.assertIn("Migration status: migrated", manifest)
         self.assertIn("Migration status: audited_not_migrated", manifest)
-        self.assertNotIn("样例角色甲", manifest)
+        self.assertNotIn("嘉豪", manifest)
         self.assertNotIn("phase4e_full_aroll", manifest)
 
 

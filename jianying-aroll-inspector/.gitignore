@@ -8,7 +8,7 @@ __pycache__/
 .env.*
 !/.env.example
 config/runtime_paths.local.yaml
-config/deepseek.local.yaml
+config/deepseek.yaml
 .idea/
 
 # runtime and generated outputs

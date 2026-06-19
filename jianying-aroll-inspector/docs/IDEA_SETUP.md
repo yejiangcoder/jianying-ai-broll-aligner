@@ -3,13 +3,13 @@
 Open only:
 
 ```text
-<suite-root>\jianying-aroll-inspector
+<repo>\jianying-aroll-inspector
 ```
 
 Do not add this directory as a content root:
 
 ```text
-<runtime-root>
+%USERPROFILE%\.auto_clip_runtime
 ```
 
 Mark these project-local directories as excluded if they still exist:

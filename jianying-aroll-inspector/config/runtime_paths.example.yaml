@@ -1,9 +1,10 @@
 runtime_root: "${HOME}/.auto_clip_runtime"
 
 aroll:
-  runs_dir: "${HOME}/.auto_clip_runtime/arll/runs"
-  reports_dir: "${HOME}/.auto_clip_runtime/arll/reports"
-  backups_dir: "${HOME}/.auto_clip_runtime/arll/backups"
+  runs_dir: "${HOME}/.auto_clip_runtime/aroll_v21_uat_runs"
+  audits_dir: "${HOME}/.auto_clip_runtime/aroll_v21_audits"
+  test_outputs_dir: "${HOME}/.auto_clip_runtime/aroll_v21_test_outputs"
+  backups_dir: "${HOME}/.auto_clip_runtime/aroll_v21_backups"
 
 broll:
   design_runs_dir: "${HOME}/.auto_clip_runtime/broll/design_runs"
@@ -26,3 +27,9 @@ cache_dir: "${HOME}/.auto_clip_runtime/cache"
 packages:
   release_dir: "${HOME}/.auto_clip_runtime/packages/release"
   dev_snapshot_dir: "${HOME}/.auto_clip_runtime/packages/dev_snapshot"
+
+jianying:
+  aligner_root: "../jianying-ai-image-aligner"
+
+deepseek:
+  config_path: "config/deepseek.yaml"

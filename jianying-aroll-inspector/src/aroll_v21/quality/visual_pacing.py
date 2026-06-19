@@ -18,6 +18,8 @@ MAX_UNSPOKEN_BRIDGE_RATIO = 0.20
 MAX_SEMANTIC_BRIDGE_SHORT_SEGMENTS = 3
 MIN_SEMANTIC_BRIDGE_EXCEPTION_US = 600_000
 SEMANTIC_BRIDGE_SHORT_SEGMENT_CAP = 8
+SEMANTIC_BRIDGE_SHORT_SEGMENT_RATIO_NUMERATOR = 15
+SEMANTIC_BRIDGE_SHORT_SEGMENT_RATIO_DENOMINATOR = 100
 CUT_DENSITY_MIN_SEGMENT_COUNT = 10
 CUT_DENSITY_WINDOW_US = 5_000_000
 MAX_CUTS_PER_MINUTE = 30.0
@@ -114,10 +116,11 @@ class VisualPacingNormalizer:
             unsafe_merge_attempt_count=unsafe_attempts,
         ):
             blocker_codes.append("V21_VISUAL_PACING_SHORT_SEGMENTS_REMAIN")
+        semantic_bridge_cap = _semantic_bridge_segment_cap(len(current))
         blocker_codes.extend(
             _semantic_bridge_gate_blockers(
                 semantic_bridge_count=semantic_bridge_count,
-                semantic_bridge_cap=SEMANTIC_BRIDGE_SHORT_SEGMENT_CAP,
+                semantic_bridge_cap=semantic_bridge_cap,
                 safe_merge_candidate_count=len(semantic_bridge_safe_merge_candidates),
             )
         )
@@ -143,7 +146,7 @@ class VisualPacingNormalizer:
             merged_weak_filler_micro_segment_count=merged_weak_filler_micro,
             dropped_weak_filler_micro_segment_count=dropped_weak_filler_micro,
             padded_short_count=padded_short_count,
-            semantic_bridge_cap=SEMANTIC_BRIDGE_SHORT_SEGMENT_CAP,
+            semantic_bridge_cap=semantic_bridge_cap,
             semantic_bridge_safe_merge_candidates=semantic_bridge_safe_merge_candidates,
             cut_density_report=cut_density_report,
         )
@@ -313,15 +316,27 @@ def build_visual_pacing_report(
     captions: list[CaptionRenderUnit],
     executed: bool = False,
     merge_report: dict[str, Any] | None = None,
+    source_graph: CanonicalSourceGraph | None = None,
 ) -> dict[str, Any]:
     merge_report = dict(merge_report or {})
+    timeline_changed_after_visual_pacing = int(merge_report.get("final_visible_repair_action_count") or 0) > 0
     before_short = int(merge_report.get("visual_short_segment_count_lt_1200ms_before") or _short_count(final_timeline))
-    after_short = int(merge_report.get("visual_short_segment_count_lt_1200ms_after") or _short_count(final_timeline))
-    semantic_bridge_count = int(
-        merge_report.get("semantic_bridge_short_segment_count")
-        or sum(1 for segment in final_timeline if _is_allowed_semantic_bridge_exception(segment))
+    after_short = (
+        _short_count(final_timeline)
+        if timeline_changed_after_visual_pacing
+        else int(merge_report.get("visual_short_segment_count_lt_1200ms_after") or _short_count(final_timeline))
     )
-    if merge_report.get("visual_short_segment_count_lt_1200ms_after_blocking") is not None:
+    semantic_bridge_count = (
+        sum(1 for segment in final_timeline if _is_allowed_semantic_bridge_exception(segment))
+        if timeline_changed_after_visual_pacing
+        else int(
+            merge_report.get("semantic_bridge_short_segment_count")
+            or sum(1 for segment in final_timeline if _is_allowed_semantic_bridge_exception(segment))
+        )
+    )
+    if timeline_changed_after_visual_pacing:
+        blocking_short_count = _blocking_short_count(final_timeline)
+    elif merge_report.get("visual_short_segment_count_lt_1200ms_after_blocking") is not None:
         blocking_short_count = int(merge_report.get("visual_short_segment_count_lt_1200ms_after_blocking") or 0)
     elif merge_report.get("semantic_bridge_short_segment_count") is not None:
         blocking_short_count = max(0, after_short - semantic_bridge_count)
@@ -332,8 +347,12 @@ def build_visual_pacing_report(
         if isinstance(merge_report.get("visual_pacing_allowed_short_segment_threshold"), int)
         else _allowed_blocking_short_count(final_timeline)
     )
-    blocker_codes = list(merge_report.get("visual_pacing_blocker_codes") or [])
-    safety_report = _safety_report_from_merge_report(merge_report, final_timeline, captions)
+    blocker_codes = [] if timeline_changed_after_visual_pacing else list(merge_report.get("visual_pacing_blocker_codes") or [])
+    safety_report = (
+        _build_visual_merge_safety_report(final_timeline, source_graph, unsafe_merge_attempt_count=0)
+        if timeline_changed_after_visual_pacing and source_graph is not None
+        else _safety_report_from_merge_report(merge_report, final_timeline, captions)
+    )
     if not executed:
         blocker_codes.append("V21_VISUAL_PACING_NOT_EXECUTED")
     unsafe_merge_attempt_count = int(
@@ -349,8 +368,13 @@ def build_visual_pacing_report(
         blocker_codes.append("V21_VISUAL_PACING_SHORT_SEGMENTS_REMAIN")
     if not bool(safety_report.get("gate_passed")):
         blocker_codes.extend(str(code) for code in safety_report.get("blocker_codes") or [])
-    semantic_bridge_cap = int(merge_report.get("semantic_bridge_cap") or SEMANTIC_BRIDGE_SHORT_SEGMENT_CAP)
-    safe_merge_candidates = list(merge_report.get("semantic_bridge_safe_merge_candidates") or [])
+    semantic_bridge_cap = _semantic_bridge_segment_cap(len(final_timeline))
+    if timeline_changed_after_visual_pacing and source_graph is not None:
+        safe_merge_candidates = _semantic_bridge_safe_merge_candidates(final_timeline, source_graph)
+    elif timeline_changed_after_visual_pacing:
+        safe_merge_candidates = []
+    else:
+        safe_merge_candidates = list(merge_report.get("semantic_bridge_safe_merge_candidates") or [])
     blocker_codes.extend(
         _semantic_bridge_gate_blockers(
             semantic_bridge_count=semantic_bridge_count,
@@ -1354,6 +1378,15 @@ def _semantic_bridge_gate_blockers(
         return ["V21_VISUAL_SEMANTIC_BRIDGE_ABUSE"]
     no_blockers: list[str] = []
     return no_blockers
+
+
+def _semantic_bridge_segment_cap(segment_count: int) -> int:
+    scaled_cap = (
+        int(segment_count) * SEMANTIC_BRIDGE_SHORT_SEGMENT_RATIO_NUMERATOR
+        + SEMANTIC_BRIDGE_SHORT_SEGMENT_RATIO_DENOMINATOR
+        - 1
+    ) // SEMANTIC_BRIDGE_SHORT_SEGMENT_RATIO_DENOMINATOR
+    return max(SEMANTIC_BRIDGE_SHORT_SEGMENT_CAP, scaled_cap)
 
 
 def _cut_density_report_from_merge_report(

@@ -18,18 +18,32 @@ def _source_text() -> str:
     return "\n".join(path.read_text("utf-8") for path in _python_files())
 
 
+def _all_src_text() -> str:
+    return "\n".join(path.read_text("utf-8") for path in (ROOT / "src").rglob("*.py"))
+
+
 class ArollV21FinalStaticHiddenBugScanTests(unittest.TestCase):
     def test_no_forbidden_v20_or_real_draft_hardcoded_paths_or_phrases(self) -> None:
         text = _source_text()
-        self.assertIsNone(re.search(r"[A-Z]:\\\\JianyingPro\s+Drafts", text, flags=re.IGNORECASE))
         for token in (
             "material_text_rows",
+            "JianyingPro Drafts",
             "6月15日",
-            "样例角色甲",
+            "嘉豪",
             "随意的",
             "肆意的",
             "踩踏",
             "这说明",
+        ):
+            self.assertNotIn(token, text)
+
+    def test_no_hardcoded_qc_sample_phrases_in_src(self) -> None:
+        text = _all_src_text()
+        for token in (
+            "嘉豪",
+            "粪坑",
+            "舞台中央",
+            "6月18日",
         ):
             self.assertNotIn(token, text)
 

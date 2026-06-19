@@ -106,6 +106,7 @@ class ArollV21FullChainInternalSelfCheckTests(unittest.TestCase):
                         semantic_decisions_json=semantic_decisions_json,
                         commit=True,
                         allow_sacrificial_write_without_postwrite_decrypt=True,
+                        report_profile="debug",
                     )
                 )
 

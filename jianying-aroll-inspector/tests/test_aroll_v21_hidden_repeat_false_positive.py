@@ -18,6 +18,12 @@ class ArollV21HiddenRepeatFalsePositiveTests(unittest.TestCase):
         self.assertNotIn("UNIT_SPLIT_REQUIRES_HUMAN_REVIEW", [blocker.code for blocker in report.blocker_report.blockers])
         self.assertNotIn("hidden_audio_repeat", {cluster.repeat_type for cluster in report.repeat_clusters})
 
+    def test_quantity_reduplication_modifier_does_not_create_hidden_repeat(self) -> None:
+        report = _run_text("尊严一寸一寸地给老子抢回来")
+
+        self.assertNotIn("UNIT_SPLIT_REQUIRES_HUMAN_REVIEW", [blocker.code for blocker in report.blocker_report.blockers])
+        self.assertNotIn("hidden_audio_repeat", {cluster.repeat_type for cluster in report.repeat_clusters})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,10 @@ from aroll_v21.ir.models import CandidateEvidence, CanonicalSourceGraph, EditUni
 from aroll_v21.quality.repeat_span_repair import self_repair_aborted_phrase_candidate
 
 
+CJK_NUMERAL_PREFIXES = tuple("一二两三四五六七八九十百千万半几多")
+REDUPLICATION_MODIFIER_SUFFIXES = ("的", "地")
+
+
 def _unit_display_rows(units: list[EditUnit]) -> list[dict[str, Any]]:
     return [
         {
@@ -231,21 +235,44 @@ class CandidateEvidenceBuilder:
         if len(related) != 1:
             return {}
         unit = related[0]
+        metadata: dict[str, Any] = {"word_tokens": self._word_tokens_for_unit(unit, words_by_id)}
         span = candidate.get("span") if isinstance(candidate.get("span"), dict) else {}
-        if not isinstance(span, dict) or span.get("start_char") is None:
-            return {}
-        start_char = int(span.get("start_char") or 0)
         phrase = str(candidate.get("phrase") or candidate.get("overlap") or "")
         if not phrase:
-            return {}
-        drop_len = len(phrase)
-        if str(candidate.get("type") or "") == "restart_disfluency" and len(phrase) >= 3:
-            drop_len = len(phrase) - 1
-        drop_word_ids = self._word_ids_for_cjk_char_span(unit, words_by_id, start_char, start_char + drop_len)
+            metadata["split_failed_reason"] = "drop_text_missing_for_unit_split_binding"
+            return metadata
+        drop_word_ids: list[str] = []
+        binding_source = "candidate_char_span"
+        if isinstance(span, dict) and span.get("start_char") is not None:
+            start_char = int(span.get("start_char") or 0)
+            drop_len = len(phrase)
+            if str(candidate.get("type") or "") == "restart_disfluency" and len(phrase) >= 3:
+                drop_len = len(phrase) - 1
+            drop_word_ids = self._word_ids_for_cjk_char_span(unit, words_by_id, start_char, start_char + drop_len)
         if not drop_word_ids:
-            return {}
+            token_binding = self._whole_word_split_for_phrase(unit, words_by_id, phrase)
+            drop_word_ids = list(token_binding.get("drop_word_ids") or [])
+            binding_source = str(token_binding.get("binding_source") or "source_word_token_binding")
+        if not drop_word_ids:
+            metadata.update(
+                {
+                    "split_drop_text": phrase,
+                    "normalized_drop_text": normalize_text(phrase),
+                    "split_failed_reason": "no_safe_whole_word_binding_for_drop_text",
+                }
+            )
+            return metadata
         keep_word_ids = [word_id for word_id in unit.word_ids if word_id not in set(drop_word_ids)]
-        return {"split_drop_word_ids": drop_word_ids, "split_keep_word_ids": keep_word_ids}
+        metadata.update(
+            {
+                "split_drop_word_ids": drop_word_ids,
+                "split_keep_word_ids": keep_word_ids,
+                "split_drop_text": phrase,
+                "normalized_drop_text": normalize_text(phrase),
+                "split_binding_source": binding_source,
+            }
+        )
+        return metadata
 
     def _word_ids_for_cjk_char_span(
         self,
@@ -399,11 +426,17 @@ class CandidateEvidenceBuilder:
     def _intra_unit_repeats(self, units: list[EditUnit], words_by_id: dict[str, Any]) -> list[RepeatCluster]:
         clusters: list[RepeatCluster] = []
         for seq, unit in enumerate(units, start=3000):
-            spans = [span for span in repeated_phrase_spans(unit.text) if not self._is_a_not_a_false_positive(unit.text, span)]
+            spans = [
+                span
+                for span in repeated_phrase_spans(unit.text)
+                if not self._is_a_not_a_false_positive(unit.text, span)
+                and not self._is_protected_quantity_reduplication(unit.text, span)
+            ]
             word_audio_spans = self._word_audio_repeat_spans(unit, words_by_id)
             high_confidence = [span for span in spans if int(span.get("phrase_len") or 0) >= 2] + word_audio_spans
             if not high_confidence:
                 continue
+            split_metadata = self._split_metadata_for_repeat_spans(unit, words_by_id, high_confidence)
             evidence = self._evidence(
                 seq=seq,
                 evidence_type="hidden_audio_repeat",
@@ -411,7 +444,7 @@ class CandidateEvidenceBuilder:
                 reason="single edit unit contains repeated normalized phrase span",
                 confidence=0.9,
                 requires_semantic_decision=False,
-                metadata={"spans": high_confidence[:10]},
+                metadata={"spans": high_confidence[:10], "word_tokens": self._word_tokens_for_unit(unit, words_by_id)} | split_metadata,
             )
             clusters.append(
                 self._cluster(
@@ -436,6 +469,8 @@ class CandidateEvidenceBuilder:
                 left = tokens[start : start + size]
                 right = tokens[start + size : start + (size * 2)]
                 if left == right:
+                    if self._is_protected_word_audio_quantity_reduplication(tokens, start, size):
+                        continue
                     spans.append(
                         {
                             "source": "word_audio_sequence",
@@ -445,6 +480,112 @@ class CandidateEvidenceBuilder:
                         }
                     )
         return spans
+
+    def _split_metadata_for_repeat_spans(
+        self,
+        unit: EditUnit,
+        words_by_id: dict[str, Any],
+        spans: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        for span in spans:
+            phrase = str(span.get("phrase") or "")
+            if not phrase:
+                continue
+            binding = self._whole_word_split_for_phrase(unit, words_by_id, phrase)
+            drop_word_ids = list(binding.get("drop_word_ids") or [])
+            if drop_word_ids:
+                keep_word_ids = [word_id for word_id in unit.word_ids if word_id not in set(drop_word_ids)]
+                return {
+                    "split_drop_word_ids": drop_word_ids,
+                    "split_keep_word_ids": keep_word_ids,
+                    "split_drop_text": phrase,
+                    "normalized_drop_text": normalize_text(phrase),
+                    "split_binding_source": str(binding.get("binding_source") or "source_word_token_binding"),
+                }
+        return {"split_failed_reason": "no_safe_whole_word_binding_for_repeat_spans"}
+
+    def _whole_word_split_for_phrase(
+        self,
+        unit: EditUnit,
+        words_by_id: dict[str, Any],
+        phrase: str,
+    ) -> dict[str, Any]:
+        target = normalize_text(phrase)
+        tokens = self._word_tokens_for_unit(unit, words_by_id)
+        if not target or not tokens:
+            return {}
+        exact_spans = self._exact_whole_word_spans(tokens, target)
+        for span in exact_spans:
+            if any(int(other["start"]) >= int(span["end"]) for other in exact_spans):
+                return {"drop_word_ids": list(span["word_ids"]), "binding_source": "exact_repeated_ngram"}
+            if self._later_prefix_repeat_exists(tokens, span, target):
+                return {"drop_word_ids": list(span["word_ids"]), "binding_source": "short_phrase_before_longer_prefix_word"}
+        return {}
+
+    def _exact_whole_word_spans(self, tokens: list[dict[str, str]], target: str) -> list[dict[str, Any]]:
+        spans: list[dict[str, Any]] = []
+        for start in range(len(tokens)):
+            joined = ""
+            word_ids: list[str] = []
+            for end in range(start, len(tokens)):
+                joined += normalize_text(tokens[end]["text"])
+                word_ids.append(tokens[end]["word_id"])
+                if joined == target:
+                    spans.append({"start": start, "end": end + 1, "word_ids": list(word_ids)})
+                    break
+                if len(joined) >= len(target) or not target.startswith(joined):
+                    break
+        return spans
+
+    def _later_prefix_repeat_exists(self, tokens: list[dict[str, str]], span: dict[str, Any], target: str) -> bool:
+        for start in range(int(span["end"]), len(tokens)):
+            joined = ""
+            for end in range(start, len(tokens)):
+                joined += normalize_text(tokens[end]["text"])
+                if joined == target or joined.startswith(target):
+                    return True
+                if not target.startswith(joined):
+                    break
+        return False
+
+    def _word_tokens_for_unit(self, unit: EditUnit, words_by_id: dict[str, Any]) -> list[dict[str, str]]:
+        tokens: list[dict[str, str]] = []
+        for word_id in unit.word_ids:
+            word = words_by_id.get(word_id)
+            text = normalize_text(str(getattr(word, "text", "") or ""))
+            if word is None or not text:
+                return []
+            tokens.append({"word_id": word_id, "text": text})
+        return tokens
+
+    def _is_protected_quantity_reduplication(self, text: str, span: dict[str, Any]) -> bool:
+        phrase = normalize_text(str(span.get("phrase") or ""))
+        if not self._looks_like_quantity_phrase(phrase):
+            return False
+        start = int(span.get("start_char") or 0)
+        phrase_len = int(span.get("phrase_len") or len(phrase))
+        norm = normalize_text(text)
+        suffix_index = start + (phrase_len * 2)
+        if suffix_index < 0 or suffix_index >= len(norm):
+            return False
+        return norm[suffix_index] in REDUPLICATION_MODIFIER_SUFFIXES
+
+    def _is_protected_word_audio_quantity_reduplication(self, tokens: list[str], start: int, size: int) -> bool:
+        phrase = "".join(tokens[start : start + size])
+        if not self._looks_like_quantity_phrase(phrase):
+            return False
+        suffix_index = start + (size * 2)
+        if suffix_index >= len(tokens):
+            return False
+        suffix = normalize_text(tokens[suffix_index])
+        return suffix.startswith(REDUPLICATION_MODIFIER_SUFFIXES)
+
+    def _looks_like_quantity_phrase(self, phrase: str) -> bool:
+        if len(phrase) < 2 or len(phrase) > 4:
+            return False
+        if not phrase.startswith(CJK_NUMERAL_PREFIXES):
+            return False
+        return any(char not in CJK_NUMERAL_PREFIXES for char in phrase[1:])
 
     def _is_a_not_a_false_positive(self, text: str, span: dict[str, Any]) -> bool:
         phrase = str(span.get("phrase") or "")

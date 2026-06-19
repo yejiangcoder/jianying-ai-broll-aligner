@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from aroll_attached_effects_preservation import inspect_attached_effects
+from aroll_root_mirror import root_mirrors_timeline_id
 from aroll_runtime_paths import get_aroll_runs_dir
 from aroll_speed_mapping import EPSILON, source_to_target_delta
 from jy_bridge import (
@@ -21,7 +22,6 @@ from jy_bridge import (
     norm_text,
     read_json,
     resolve_timeline_id,
-    root_mirrors_timeline_id,
     write_json,
 )
 

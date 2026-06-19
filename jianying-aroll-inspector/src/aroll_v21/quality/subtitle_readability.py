@@ -13,6 +13,21 @@ SUBTITLE_GAP_US = 20_000
 MAX_CAPTIONS_LE_3_CHARS = 3
 CAPTION_DENSITY_WINDOW_US = 5_000_000
 MAX_CAPTIONS_IN_5S = 8
+MAX_COMPOUND_BOUNDARY_SOURCE_GAP_US = 120_000
+BOUND_COMPOUND_SUFFIXES = (
+    "区",
+    "圈",
+    "群",
+    "场",
+    "端",
+    "口",
+    "线",
+    "面",
+    "点",
+    "处",
+    "侧",
+    "边",
+)
 
 
 def text_len(text: str) -> int:
@@ -38,7 +53,7 @@ def split_words_for_display(words: list[Any]) -> list[list[Any]]:
     chunks: list[list[Any]] = []
     for group in subtitle_groups:
         chunks.extend(_split_group_for_display(group))
-    return chunks
+    return merge_compound_boundary_fragments(chunks)
 
 
 def merge_tiny_display_fragments(chunks: list[list[Any]]) -> list[list[Any]]:
@@ -60,6 +75,18 @@ def merge_tiny_display_fragments(chunks: list[list[Any]]) -> list[list[Any]]:
                 continue
         merged.append(chunk)
         index += 1
+    return merged
+
+
+def merge_compound_boundary_fragments(chunks: list[list[Any]]) -> list[list[Any]]:
+    merged: list[list[Any]] = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        if merged and _should_merge_compound_boundary(merged[-1], chunk):
+            merged[-1] = [*merged[-1], *chunk]
+            continue
+        merged.append(chunk)
     return merged
 
 
@@ -209,3 +236,30 @@ def _chunk_duration_us(chunk: list[Any]) -> int:
     if not chunk:
         return 0
     return max(0, int(getattr(chunk[-1], "source_end_us", 0)) - int(getattr(chunk[0], "source_start_us", 0)))
+
+
+def _should_merge_compound_boundary(left: list[Any], right: list[Any]) -> bool:
+    if not left or not right:
+        return False
+    if _chunk_text_len(left + right) > HARD_MAX_CHARS:
+        return False
+    if _chunk_duration_us(left + right) > HARD_MAX_DURATION_US:
+        return False
+    left_word = left[-1]
+    right_word = right[0]
+    left_text = str(getattr(left_word, "text", "") or "").strip()
+    right_text = str(getattr(right_word, "text", "") or "").strip()
+    if len(left_text) < 2 or right_text not in BOUND_COMPOUND_SUFFIXES:
+        return False
+    gap_us = int(getattr(right_word, "source_start_us", 0)) - int(getattr(left_word, "source_end_us", 0))
+    if gap_us < -80_000 or gap_us > MAX_COMPOUND_BOUNDARY_SOURCE_GAP_US:
+        return False
+    left_material = str(getattr(left_word, "source_material_id", "") or "")
+    right_material = str(getattr(right_word, "source_material_id", "") or "")
+    if left_material and right_material and left_material != right_material:
+        return False
+    left_segment = str(getattr(left_word, "source_segment_id", "") or "")
+    right_segment = str(getattr(right_word, "source_segment_id", "") or "")
+    if left_segment and right_segment and left_segment != right_segment:
+        return False
+    return True

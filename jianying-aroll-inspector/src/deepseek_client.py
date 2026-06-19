@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -9,12 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aroll_runtime_paths import get_deepseek_config_path
 
-TOOL_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = Path(
-    os.environ.get("DEEPSEEK_CONFIG_PATH")
-    or (TOOL_ROOT / "config" / "deepseek.local.yaml")
-)
+DEFAULT_CONFIG = get_deepseek_config_path()
 
 
 @dataclass(frozen=True)
@@ -42,7 +38,9 @@ def _strip_yaml_value(value: str) -> str:
     return value.strip()
 
 
-def load_deepseek_config(path: Path = DEFAULT_CONFIG) -> DeepSeekConfig:
+def load_deepseek_config(path: Path | None = None) -> DeepSeekConfig:
+    if path is None:
+        path = get_deepseek_config_path()
     if not path.exists():
         raise RuntimeError(f"DeepSeek config not found: {path}")
     lines = path.read_text("utf-8").splitlines()
@@ -53,7 +51,7 @@ def load_deepseek_config(path: Path = DEFAULT_CONFIG) -> DeepSeekConfig:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         indent = len(line) - len(line.lstrip(" "))
-        stripped = line.strip()
+        stripped = line.strip().lstrip("\ufeff")
         if stripped == "deepseek:":
             in_deepseek = True
             base_indent = indent
@@ -65,11 +63,16 @@ def load_deepseek_config(path: Path = DEFAULT_CONFIG) -> DeepSeekConfig:
             values[key.strip()] = _strip_yaml_value(value)
     api_key = values.get("api-key") or values.get("api_key") or ""
     base_url = values.get("base-url") or values.get("base_url") or ""
-    if not api_key:
+    if not _is_configured_api_key(api_key):
         raise RuntimeError(f"DeepSeek api-key not found in {path}")
     if not base_url:
         raise RuntimeError(f"DeepSeek base-url not found in {path}")
     return DeepSeekConfig(config_path=path, base_url=base_url.rstrip("/"), api_key=api_key)
+
+
+def _is_configured_api_key(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and "REPLACE_WITH" not in text
 
 
 def _redact(text: str, api_key: str) -> str:

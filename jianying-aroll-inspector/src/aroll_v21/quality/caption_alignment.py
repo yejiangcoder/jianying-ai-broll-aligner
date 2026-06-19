@@ -7,6 +7,7 @@ from aroll_v21.quality.subtitle_readability import subtitle_interval_report
 
 
 MIN_CAPTION_DURATION_US = 300_000
+MAX_MULTI_SEGMENT_CAPTION_TARGET_GAP_US = 120_000
 
 
 def build_caption_alignment_report(
@@ -39,19 +40,21 @@ def build_caption_alignment_report(
         if not containers:
             without_container_count += 1
             floating_caption_count += 1
-        elif not any(segment.target_start_us <= caption.target_start_us and caption.target_end_us <= segment.target_end_us for segment in containers):
+        elif not _caption_target_covered_by_containers(caption, containers):
             outside_count += 1
             floating_caption_count += 1
         if containers:
             crosses_primary_window = False
             spoken_start = caption.spoken_source_start_us
             spoken_end = caption.spoken_source_end_us
-            if spoken_start is not None and spoken_end is not None:
+            caption_words = set(caption.word_ids)
+            container_words = {word_id for segment in containers for word_id in segment.word_ids}
+            if caption_words:
+                if not caption_words <= container_words:
+                    crosses_primary_window = True
+            elif spoken_start is not None and spoken_end is not None:
                 if not any(segment.source_start_us <= spoken_start and spoken_end <= segment.source_end_us for segment in containers):
                     crosses_primary_window = True
-            caption_words = set(caption.word_ids)
-            if caption_words and not any(caption_words <= set(segment.word_ids) for segment in containers):
-                crosses_primary_window = True
             if crosses_primary_window:
                 cross_window_count += 1
         text = normalize_text(caption.text)
@@ -169,3 +172,25 @@ def _unique(values: list[str]) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _caption_target_covered_by_containers(caption: CaptionRenderUnit, containers: list[FinalTimelineSegment]) -> bool:
+    start = int(caption.target_start_us)
+    end = int(caption.target_end_us)
+    if any(int(segment.target_start_us) <= start and end <= int(segment.target_end_us) for segment in containers):
+        return True
+    ordered = sorted(containers, key=lambda segment: (int(segment.target_start_us), int(segment.target_end_us), segment.segment_id))
+    if len(ordered) < 2 or int(ordered[0].target_start_us) > start or int(ordered[-1].target_end_us) < end:
+        return False
+    cursor = start
+    for segment in ordered:
+        segment_start = int(segment.target_start_us)
+        segment_end = int(segment.target_end_us)
+        if segment_end <= cursor:
+            continue
+        if segment_start > cursor + MAX_MULTI_SEGMENT_CAPTION_TARGET_GAP_US:
+            return False
+        cursor = max(cursor, segment_end)
+        if cursor >= end:
+            return True
+    return cursor >= end

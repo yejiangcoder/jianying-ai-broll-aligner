@@ -108,6 +108,128 @@ class ArollV21RoughCutQualityNormalizerTests(unittest.TestCase):
         self.assertEqual(normalized[0].lead_handle_us, 220_000)
         self.assertEqual(normalized[0].tail_handle_us, 220_000)
 
+    def test_unmergeable_weak_filler_micro_segment_drops_without_sample_text_special_case(self) -> None:
+        words = [
+            make_word("w1", "前面一句完整内容", 0, 1_200_000, "s1", 1),
+            make_word("w2", "呃", 3_300_000, 3_340_000, "s2", 2),
+            make_word("w3", "后面一句继续表达", 5_100_000, 6_300_000, "s3", 3),
+        ]
+        segments = [
+            make_segment("seg1", "前面一句完整内容", 0, 1_200_000, ["w1"]),
+            make_segment("seg2", "呃", 3_300_000, 3_340_000, ["w2"]),
+            make_segment("seg3", "后面一句继续表达", 5_100_000, 6_300_000, ["w3"]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        normalized, blockers = RoughCutQualityNormalizer().normalize(
+            segments,
+            make_source_graph(words, source_end_us=7_000_000),
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([segment.text for segment in normalized], ["前面一句完整内容", "后面一句继续表达"])
+        self.assertIn(
+            "drop_weak_filler_micro_segment",
+            [row.get("decision") for row in plan.decision_trace],
+        )
+
+    def test_rough_cut_drops_residual_weak_filler_micro_segment(self) -> None:
+        words = [
+            make_word("w1", "前面一句完整内容", 0, 1_200_000, "s1", 1),
+            make_word("w2", "嗯", 3_300_000, 3_340_000, "s2", 2),
+            make_word("w3", "后面一句继续表达", 5_100_000, 6_300_000, "s3", 3),
+        ]
+        segments = [
+            make_segment("seg1", "前面一句完整内容", 0, 1_200_000, ["w1"]),
+            make_segment("seg2", "嗯", 3_300_000, 3_340_000, ["w2"]),
+            make_segment("seg3", "后面一句继续表达", 5_100_000, 6_300_000, ["w3"]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        normalized, blockers = RoughCutQualityNormalizer().normalize(
+            segments,
+            make_source_graph(words, source_end_us=7_000_000),
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([segment.text for segment in normalized], ["前面一句完整内容", "后面一句继续表达"])
+        self.assertIn("drop_weak_filler_micro_segment", [row.get("decision") for row in plan.decision_trace])
+
+    def test_rough_cut_residual_prefix_trace_contract_preserved(self) -> None:
+        words = [
+            make_word("w1", "A", 340_000, 620_000, "s1", 1),
+            make_word("w2", "Axxx", 2_400_000, 3_000_000, "s2", 2),
+        ]
+        segments = [
+            make_segment("seg1", "A", 340_000, 620_000, ["w1"]),
+            make_segment("seg2", "Axxx", 2_400_000, 3_000_000, ["w2"]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        normalized, blockers = RoughCutQualityNormalizer().normalize(
+            segments,
+            make_source_graph(words, source_end_us=4_000_000),
+            plan,
+        )
+
+        trace = [row for row in plan.decision_trace if row.get("route") == "residual_prefix_containment_drop"]
+        self.assertEqual(blockers, [])
+        self.assertEqual([segment.text for segment in normalized], ["Axxx"])
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["decision"], "drop_residual_prefix_segment")
+        self.assertTrue(trace[0]["applied"])
+        self.assertEqual(trace[0]["reason"], "residual_text_is_prefix_of_next_text")
+        self.assertEqual(trace[0]["component"], "rough_cut_quality_normalizer")
+
+    def test_rough_cut_does_not_drop_structural_function_word_micro_segment(self) -> None:
+        words = [
+            make_word("w1", "前面一句完整内容", 0, 1_200_000, "s1", 1),
+            make_word("w2", "就", 3_300_000, 3_340_000, "s2", 2),
+            make_word("w3", "后面一句继续表达", 5_100_000, 6_300_000, "s3", 3),
+        ]
+        segments = [
+            make_segment("seg1", "前面一句完整内容", 0, 1_200_000, ["w1"]),
+            make_segment("seg2", "就", 3_300_000, 3_340_000, ["w2"]),
+            make_segment("seg3", "后面一句继续表达", 5_100_000, 6_300_000, ["w3"]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        normalized, blockers = RoughCutQualityNormalizer().normalize(
+            segments,
+            make_source_graph(words, source_end_us=7_000_000),
+            plan,
+        )
+
+        self.assertIn("就", [segment.text for segment in normalized])
+        self.assertTrue(blockers)
+        self.assertNotIn("drop_weak_filler_micro_segment", [row.get("decision") for row in plan.decision_trace])
+
+    def test_rough_cut_does_not_drop_structural_function_prefix_micro_segment(self) -> None:
+        words = [
+            make_word("w1", "前面一句完整内容", 0, 1_200_000, "s1", 1),
+            make_word("w2", "就", 3_300_000, 3_340_000, "s2", 2),
+            make_word("w3", "就有完整后句", 5_100_000, 6_300_000, "s3", 3),
+        ]
+        segments = [
+            make_segment("seg1", "前面一句完整内容", 0, 1_200_000, ["w1"]),
+            make_segment("seg2", "就", 3_300_000, 3_340_000, ["w2"]),
+            make_segment("seg3", "就有完整后句", 5_100_000, 6_300_000, ["w3"]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        normalized, blockers = RoughCutQualityNormalizer().normalize(
+            segments,
+            make_source_graph(words, source_end_us=7_000_000),
+            plan,
+        )
+
+        self.assertIn("就", [segment.text for segment in normalized])
+        self.assertTrue(blockers)
+        self.assertNotIn("drop_residual_prefix_segment", [row.get("decision") for row in plan.decision_trace])
+        self.assertFalse(any(row.get("route") == "residual_prefix_containment_drop" for row in plan.decision_trace))
+
 
 if __name__ == "__main__":
     unittest.main()

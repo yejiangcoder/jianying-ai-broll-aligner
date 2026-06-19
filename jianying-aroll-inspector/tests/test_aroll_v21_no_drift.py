@@ -55,7 +55,7 @@ class ArollV21NoDriftTests(unittest.TestCase):
     def test_real_uat_phrases_are_not_hardcoded_in_v21_src(self) -> None:
         text = v21_source_text()
         for term in (
-            "样例角色甲",
+            "嘉豪",
             "数字游民",
             "螃蟹效应",
             "敢张",

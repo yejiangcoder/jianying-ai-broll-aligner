@@ -386,7 +386,7 @@ class CjkShortRepeatGateTest(unittest.TestCase):
             for path in existing_core_files
         )
         for forbidden in (
-            "样例角色甲",
+            "嘉豪",
             "螃蟹效应",
             "数字游民",
             "能不能",

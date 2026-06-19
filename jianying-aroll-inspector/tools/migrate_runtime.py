@@ -2,30 +2,37 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RUNTIME_ROOT = Path(os.environ.get("AUTO_CLIP_RUNTIME_DIR") or (Path.home() / ".auto_clip_runtime"))
+SRC_ROOT = TOOL_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from aroll_runtime_paths import get_aroll_audits_dir, get_runtime_root
+
+DEFAULT_RUNTIME_ROOT = get_runtime_root()
+DEFAULT_AUDIT_ROOT = get_aroll_audits_dir()
 
 MOVE_DIR_MAP = {
-    "runtime": ("arll", "runs"),
+    "runtime": ("aroll_v21_uat_runs",),
     "release": ("packages", "release"),
     "dev_snapshot": ("packages", "dev_snapshot"),
     "logs": ("logs",),
     "exports": ("exports",),
     "temp": ("temp",),
     "cache": ("cache",),
-    "reports": ("arll", "reports"),
-    "audio_vad": ("arll", "temp", "audio_vad"),
-    "post_inspect_runtime": ("arll", "runs", "post_inspect_runtime"),
-    "baseline_backup": ("arll", "backups", "baseline_backup"),
-    "backup": ("arll", "backups", "backup"),
-    "restore_check": ("arll", "backups", "restore_check"),
+    "reports": ("aroll_v21_audits",),
+    "audio_vad": ("aroll_v21_test_outputs", "audio_vad"),
+    "post_inspect_runtime": ("aroll_v21_uat_runs", "post_inspect_runtime"),
+    "baseline_backup": ("aroll_v21_backups", "baseline_backup"),
+    "backup": ("aroll_v21_backups", "backup"),
+    "restore_check": ("aroll_v21_backups", "restore_check"),
 }
 
 KEEP_ROOT_DIRS = {"src", "tests", "profiles", "config", "docs", "tools"}
@@ -215,11 +222,12 @@ def migration_plan(scan: dict[str, Any], runtime_root: Path) -> dict[str, Any]:
     return {
         "runtime_root": str(runtime_root),
         "directory_layout": {
-            "arll/runs": str(runtime_root / "arll" / "runs"),
-            "arll/reports": str(runtime_root / "arll" / "reports"),
-            "arll/backups": str(runtime_root / "arll" / "backups"),
-            "arll/temp": str(runtime_root / "arll" / "temp"),
-            "arll/cache": str(runtime_root / "arll" / "cache"),
+            "aroll_v21_uat_runs": str(runtime_root / "aroll_v21_uat_runs"),
+            "aroll_v21_audits": str(runtime_root / "aroll_v21_audits"),
+            "aroll_v21_test_outputs": str(runtime_root / "aroll_v21_test_outputs"),
+            "aroll_v21_backups": str(runtime_root / "aroll_v21_backups"),
+            "temp": str(runtime_root / "temp"),
+            "cache": str(runtime_root / "cache"),
             "broll/design_runs": str(runtime_root / "broll" / "design_runs"),
             "broll/material_index": str(runtime_root / "broll" / "material_index"),
             "broll/downloaded_materials": str(runtime_root / "broll" / "downloaded_materials"),
@@ -356,7 +364,10 @@ def write_layering_report(path_md: Path, path_json: Path, scan: dict[str, Any], 
             "Do not move real Jianying drafts.",
             "If moved output is wrong, copy back from external runtime path to original project path.",
         ],
-        "idea_setup": "Open only the source checkout. Exclude runtime/release/dev_snapshot. Do not add the external runtime root as a content root.",
+        "idea_setup": (
+            f"Open only {TOOL_ROOT.as_posix()}. Exclude runtime/release/dev_snapshot. "
+            f"Do not add {Path(plan['runtime_root']).as_posix()} as content root."
+        ),
         "roles": {
             "idea_codex": "precise code edits only; no runtime scan; no real draft writes",
             "desktop_codex": "migration, long tasks, UAT, package generation, reports; default dry-run",
@@ -427,7 +438,7 @@ def main() -> int:
     parser.add_argument("--copy-first", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-execute", action="store_true")
-    parser.add_argument("--report-dir", type=Path, default=TOOL_ROOT)
+    parser.add_argument("--report-dir", type=Path, default=DEFAULT_AUDIT_ROOT)
     args = parser.parse_args()
 
     runtime_root = args.runtime_root

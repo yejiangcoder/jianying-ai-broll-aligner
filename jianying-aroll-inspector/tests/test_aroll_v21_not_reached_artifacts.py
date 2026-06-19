@@ -34,14 +34,19 @@ class ArollV21NotReachedArtifactsTests(unittest.TestCase):
             summary = run_operator(ArollV21OperatorConfig(mode="dry-run", run_dir=run_dir, input_json=input_json))
 
             self.assertEqual(summary["status"], "blocked")
+            self.assertEqual(summary["requested_report_profile"], "standard")
+            self.assertEqual(summary["effective_report_profile"], "debug")
             final_timeline = json.loads((run_dir / "final_timeline.json").read_text("utf-8"))
             captions = json.loads((run_dir / "captions.json").read_text("utf-8"))
             validator = json.loads((run_dir / "validator_report.json").read_text("utf-8"))
+            manifest = json.loads((run_dir / "artifact_manifest.json").read_text("utf-8"))
 
             self.assertEqual(final_timeline["status"], "not_reached")
             self.assertEqual(final_timeline["blocked_by_stage"], "ingest")
             self.assertEqual(captions["status"], "not_reached")
             self.assertEqual(validator["status"], "not_reached")
+            self.assertEqual(manifest["requested_report_profile"], "standard")
+            self.assertEqual(manifest["effective_report_profile"], "debug")
 
 
 if __name__ == "__main__":

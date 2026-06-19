@@ -30,7 +30,7 @@ class ArollV21RunArtifactTests(unittest.TestCase):
             input_json = root / "input.json"
             run_dir = root / "run"
             write_input(input_json)
-            summary = run_operator(ArollV21OperatorConfig(mode="dry-run", run_dir=run_dir, input_json=input_json))
+            summary = run_operator(ArollV21OperatorConfig(mode="dry-run", run_dir=run_dir, input_json=input_json, report_profile="debug"))
             self.assertEqual(summary["status"], "ok")
             for artifact in REQUIRED_ARTIFACTS:
                 self.assertTrue((run_dir / artifact).exists(), artifact)

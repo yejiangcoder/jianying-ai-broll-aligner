@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import re
 from typing import Any
 
 from aroll_text_normalize import normalize_text
@@ -9,6 +11,26 @@ from aroll_v21.ir.models import (
     CanonicalWord,
     EditUnit,
     SourceGraphInvariantReport,
+)
+
+_CJK_TEXT_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+$")
+_RESULT_COMPLEMENT_STARTS = (
+    "出",
+    "到",
+    "成",
+    "回",
+    "来",
+    "去",
+    "起",
+    "下",
+    "上",
+    "完",
+    "掉",
+    "走",
+    "开",
+    "住",
+    "好",
+    "进",
 )
 
 
@@ -184,6 +206,7 @@ class CanonicalSourceGraphBuilder:
             self._canonical_word(index=index, row=row, source_segments=source_segments, blockers=blockers)
             for index, row in enumerate(word_timeline, start=1)
         ]
+        words = _normalize_intraword_cjk_restarts(words)
         edit_units = self._edit_units(subtitles, words, blockers, source_segments)
         if not words:
             blockers.append(Blocker("SOURCE_WORD_TIMELINE_EMPTY", "source graph has no canonical words", "ingest"))
@@ -302,7 +325,12 @@ class CanonicalSourceGraphBuilder:
             unit_words = [words_by_id[word_id] for word_id in word_ids if word_id in words_by_id]
             source_start = min((word.source_start_us for word in unit_words), default=_start(row))
             source_end = max((word.source_end_us for word in unit_words), default=_end(row))
-            text = _text(row) or "".join(word.text for word in unit_words)
+            word_text = "".join(word.text for word in unit_words)
+            has_normalized_word = any(
+                bool(word.debug_hints.get("intraword_cjk_restart_normalized"))
+                for word in unit_words
+            )
+            text = word_text if has_normalized_word and word_text else (_text(row) or word_text)
             units.append(
                 EditUnit(
                     unit_id=str(row.get("unit_id") or row.get("fragment_id") or subtitle_uid or f"unit_{index:06d}"),
@@ -361,3 +389,45 @@ class DraftIngest:
 
     def build_source_graph(self, **kwargs: Any) -> CanonicalSourceGraph:
         return self.builder.build(**kwargs)
+
+
+def _normalize_intraword_cjk_restarts(words: list[CanonicalWord]) -> list[CanonicalWord]:
+    normalized: list[CanonicalWord] = []
+    for index, word in enumerate(words):
+        next_text = words[index + 1].text if index + 1 < len(words) else ""
+        replacement = _intraword_cjk_restart_replacement(word.text, next_text)
+        if replacement is None or replacement == word.text:
+            normalized.append(word)
+            continue
+        normalized.append(
+            replace(
+                word,
+                text=replacement,
+                normalized_text=normalize_text(replacement),
+                debug_hints={
+                    **dict(word.debug_hints or {}),
+                    "intraword_cjk_restart_normalized": True,
+                    "original_text": word.text,
+                    "normalization_reason": "leading_single_char_restart_before_result_complement",
+                },
+            )
+        )
+    return normalized
+
+
+def _intraword_cjk_restart_replacement(text: str, next_text: str) -> str | None:
+    raw = str(text or "")
+    if not raw or not _CJK_TEXT_RE.fullmatch(raw):
+        no_replacement: str | None = None
+        return no_replacement
+    if len(raw) >= 3 and raw[0] == raw[1] and raw[2:].startswith(_RESULT_COMPLEMENT_STARTS):
+        return raw[1:]
+    next_normalized = normalize_text(next_text)
+    if (
+        len(raw) == 2
+        and raw[0] == raw[1]
+        and next_normalized.startswith(_RESULT_COMPLEMENT_STARTS)
+    ):
+        return raw[0]
+    no_replacement: str | None = None
+    return no_replacement

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 import tempfile
 import unittest
@@ -28,6 +27,9 @@ from aroll_v21.operator import ArollV21OperatorConfig, run_operator
 
 
 class _FakeDeepSeekResponse:
+    def __init__(self, batch_id: str = "") -> None:
+        self.batch_id = batch_id
+
     def __enter__(self):
         return self
 
@@ -35,7 +37,7 @@ class _FakeDeepSeekResponse:
         return False
 
     def read(self):
-        content = json.dumps({"decisions": []})
+        content = json.dumps({"batch_id": self.batch_id, "decisions": []})
         return json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
 
 
@@ -165,14 +167,13 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
             root = Path(tmp)
             config_dir = root / "config"
             config_dir.mkdir()
-            self._write_deepseek_yaml(config_dir / "deepseek.local.yaml", "repo-secret-token")
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                with patch.dict("os.environ", {}, clear=True):
-                    provider = deepseek_provider_from_runtime_config()
-            finally:
-                os.chdir(previous)
+            config_path = config_dir / "deepseek.local.yaml"
+            self._write_deepseek_yaml(config_path, "repo-secret-token")
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "aroll_v21.decision.deepseek_semantic_planner.DEFAULT_DEEPSEEK_CONFIG_PATHS",
+                (config_path,),
+            ):
+                provider = deepseek_provider_from_runtime_config()
 
         self.assertIsNotNone(provider)
         self.assertEqual(provider.api_key, "repo-secret-token")
@@ -200,6 +201,28 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
         self.assertIsNotNone(provider)
         self.assertEqual(provider.api_key, "env-only-secret")
         self.assertEqual(provider.config_source, "env:DEEPSEEK_API_KEY")
+
+    def test_deepseek_placeholder_config_does_not_configure_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "deepseek.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "deepseek:",
+                        "  api" + "-key: REPLACE_WITH_DEEPSEEK_API_KEY",
+                        "  base-url: https://api.deepseek.com",
+                    ]
+                ),
+                "utf-8",
+            )
+
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "aroll_v21.decision.deepseek_semantic_planner.DEFAULT_DEEPSEEK_CONFIG_PATHS",
+                (config_path,),
+            ):
+                provider = deepseek_provider_from_runtime_config()
+
+        self.assertIsNone(provider)
 
     def test_provider_uses_file_config_when_env_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,7 +255,9 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
         def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
             captured["body"] = request.data
             captured["timeout"] = timeout
-            return _FakeDeepSeekResponse()
+            payload = json.loads(request.data.decode("utf-8"))
+            user_content = json.loads(payload["messages"][1]["content"])
+            return _FakeDeepSeekResponse(batch_id=user_content["batch_id"])
 
         provider = DeepSeekSemanticProvider(api_key="unit-test-token", timeout_s=7)
         semantic_request = SemanticAdjudicationRequest(
@@ -287,9 +312,11 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
             secret = "local-config-secret-for-test-source-visibility"
             self._write_deepseek_yaml(config_path, secret)
             self._write_operator_input(input_json)
-            previous = Path.cwd()
 
-            with patch.dict("os.environ", {}, clear=True), patch.object(
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "aroll_v21.decision.deepseek_semantic_planner.DEFAULT_DEEPSEEK_CONFIG_PATHS",
+                (config_path,),
+            ), patch.object(
                 deepseek_planner.DeepSeekSemanticProvider,
                 "decide",
                 lambda self, requests: [
@@ -303,13 +330,9 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                     for request in requests
                 ],
             ):
-                try:
-                    os.chdir(root)
-                    summary = run_operator(
-                        ArollV21OperatorConfig(mode="dry-run", run_dir=run_dir, input_json=input_json, semantic_mode="auto")
-                    )
-                finally:
-                    os.chdir(previous)
+                summary = run_operator(
+                    ArollV21OperatorConfig(mode="dry-run", run_dir=run_dir, input_json=input_json, semantic_mode="auto")
+                )
 
             report_files = [run_dir / name for name in ("run_summary.json", "semantic_adjudication_report.json", "deepseek_decisions.json")]
             for report_file in report_files:
@@ -403,7 +426,8 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
             root = Path(tmp)
             config_dir = root / "config"
             config_dir.mkdir()
-            (config_dir / "deepseek.local.yaml").write_text(
+            config_path = config_dir / "deepseek.local.yaml"
+            config_path.write_text(
                 "\n".join(
                     [
                         "deepseek:",
@@ -413,13 +437,11 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                 ),
                 "utf-8",
             )
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                with patch.dict("os.environ", {}, clear=True):
-                    provider = deepseek_provider_from_runtime_config()
-            finally:
-                os.chdir(previous)
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "aroll_v21.decision.deepseek_semantic_planner.DEFAULT_DEEPSEEK_CONFIG_PATHS",
+                (config_path,),
+            ):
+                provider = deepseek_provider_from_runtime_config()
 
         self.assertIsNotNone(provider)
         self.assertTrue(bool(provider.api_key))

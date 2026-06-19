@@ -59,6 +59,8 @@ def _nested(config: dict[str, Any], *keys: str) -> str:
 def _config() -> dict[str, Any]:
     if LOCAL_CONFIG.exists():
         return _load_simple_yaml(LOCAL_CONFIG)
+    if EXAMPLE_CONFIG.exists():
+        return _load_simple_yaml(EXAMPLE_CONFIG)
     return {}
 
 
@@ -69,7 +71,8 @@ def _path_from_env_or_config(env_key: str, config_keys: tuple[str, ...], fallbac
     config = _config()
     config_value = _nested(config, *config_keys)
     if config_value:
-        return Path(config_value)
+        path = Path(config_value)
+        return path if path.is_absolute() else TOOL_ROOT / path
     warnings.warn(
         f"{env_key} and config path {'.'.join(config_keys)} are not configured; falling back to {fallback}",
         RuntimeWarning,
@@ -83,7 +86,23 @@ def get_runtime_root() -> Path:
 
 
 def get_aroll_runs_dir() -> Path:
-    return _path_from_env_or_config("AUTO_CLIP_AROLL_RUNS_DIR", ("aroll", "runs_dir"), get_runtime_root() / "arll" / "runs")
+    return _path_from_env_or_config("AUTO_CLIP_AROLL_RUNS_DIR", ("aroll", "runs_dir"), get_runtime_root() / "aroll_v21_uat_runs")
+
+
+def get_aroll_audits_dir() -> Path:
+    return _path_from_env_or_config("AUTO_CLIP_AROLL_AUDITS_DIR", ("aroll", "audits_dir"), get_runtime_root() / "aroll_v21_audits")
+
+
+def get_aroll_test_outputs_dir() -> Path:
+    return _path_from_env_or_config("AUTO_CLIP_AROLL_TEST_OUTPUTS_DIR", ("aroll", "test_outputs_dir"), get_runtime_root() / "aroll_v21_test_outputs")
+
+
+def get_aligner_root() -> Path:
+    return _path_from_env_or_config("JY_ALIGNER_ROOT", ("jianying", "aligner_root"), TOOL_ROOT.parent / "jianying-ai-image-aligner")
+
+
+def get_deepseek_config_path() -> Path:
+    return _path_from_env_or_config("DEEPSEEK_CONFIG_PATH", ("deepseek", "config_path"), CONFIG_DIR / "deepseek.yaml")
 
 
 def get_release_dir() -> Path:

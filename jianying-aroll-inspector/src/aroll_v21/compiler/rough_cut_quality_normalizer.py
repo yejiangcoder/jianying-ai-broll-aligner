@@ -14,6 +14,8 @@ PREFERRED_MIN_SEGMENT_DURATION_US = 700_000
 DEFAULT_LEAD_HANDLE_US = 220_000
 DEFAULT_TAIL_HANDLE_US = 220_000
 SOURCE_GAP_MERGE_LIMIT_US = 1_500_000
+WEAK_FILLER_MICRO_TEXTS = {"呃", "嗯", "啊", "额", "呐", "哎", "诶", "哦", "噢", "喔", "唉"}
+STRUCTURAL_FUNCTION_MICRO_TEXTS = {"的", "就", "是", "了", "在"}
 
 
 class RoughCutQualityNormalizer:
@@ -87,6 +89,9 @@ class RoughCutQualityNormalizer:
             drop_index: int | None = None
             merge_index: int | None = None
             for index, segment in self._residual_micro_segments(current):
+                if self._can_drop_weak_filler_micro_segment(segment, word_lookup):
+                    drop_index = index
+                    break
                 if self._can_drop_residual_prefix_before_next(current, index):
                     drop_index = index
                     break
@@ -96,18 +101,28 @@ class RoughCutQualityNormalizer:
                     break
             if drop_index is not None:
                 dropped = current[drop_index]
-                next_segment = current[drop_index + 1]
+                next_segment = current[drop_index + 1] if drop_index + 1 < len(current) else None
+                decision = (
+                    "drop_weak_filler_micro_segment"
+                    if self._can_drop_weak_filler_micro_segment(dropped, word_lookup)
+                    else "drop_residual_prefix_segment"
+                )
                 decision_plan.decision_trace.append(
                     {
-                        "route": "residual_prefix_containment_drop",
+                        "route": (
+                            "residual_prefix_containment_drop"
+                            if decision == "drop_residual_prefix_segment"
+                            else "rough_cut_quality_normalizer"
+                        ),
+                        "component": "rough_cut_quality_normalizer",
                         "stage": "final_timeline_pre_emit",
-                        "decision": "drop_residual_prefix_segment",
+                        "decision": decision,
                         "applied": True,
                         "dropped_segment_id": dropped.segment_id,
                         "dropped_text": dropped.text,
-                        "next_segment_id": next_segment.segment_id,
-                        "next_text": next_segment.text,
-                        "reason": "residual_text_is_prefix_of_next_text",
+                        "next_segment_id": next_segment.segment_id if next_segment is not None else "",
+                        "next_text": next_segment.text if next_segment is not None else "",
+                        "reason": "weak_filler_micro_segment" if decision == "drop_weak_filler_micro_segment" else "residual_text_is_prefix_of_next_text",
                     }
                 )
                 current = current[:drop_index] + current[drop_index + 1 :]
@@ -141,7 +156,28 @@ class RoughCutQualityNormalizer:
             return False
         current_text = normalize_text(segments[index].text)
         next_text = normalize_text(segments[index + 1].text)
+        if current_text in STRUCTURAL_FUNCTION_MICRO_TEXTS:
+            return False
         return bool(current_text and len(next_text) > len(current_text) and next_text.startswith(current_text))
+
+    def _can_drop_weak_filler_micro_segment(
+        self,
+        segment: FinalTimelineSegment,
+        word_lookup: dict[str, Any],
+    ) -> bool:
+        text = normalize_text(segment.text)
+        if text not in WEAK_FILLER_MICRO_TEXTS:
+            return False
+        if not self._is_micro_duration(segment):
+            return False
+        if len(segment.word_ids) > 2:
+            return False
+        for word_id in segment.word_ids:
+            word = word_lookup.get(word_id)
+            word_text = normalize_text(str(getattr(word, "text", "") or "")) if word is not None else ""
+            if word_text and word_text not in WEAK_FILLER_MICRO_TEXTS:
+                return False
+        return True
 
     def _residual_micro_segments(
         self,

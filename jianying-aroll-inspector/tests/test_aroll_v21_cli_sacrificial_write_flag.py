@@ -56,7 +56,7 @@ class ArollV21CliSacrificialWriteFlagTests(unittest.TestCase):
             [
                 "aroll_v21.cli",
                 "--input-json",
-                "sample_input.json",
+                "input.json",
                 "--output-dir",
                 "sample_run",
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +15,12 @@ from aroll_v21.decision import (
     SemanticAdjudicationProvider,
     SemanticDecisionPlanner,
 )
+from aroll_v21.decision.deepseek_semantic_planner import (
+    BATCH_METADATA_FIELDS,
+    SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
+    SEMANTIC_BATCH_PROVIDER_FAILED_CODE,
+    SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW_CODE,
+)
 from aroll_v21.decision.final_target_repeat_resolver import FinalTargetRepeatResolver
 from aroll_v21.decision.semantic_adjudication import request_from_final_target_payload
 from aroll_v21.decision.semantic_contracts import (
@@ -26,8 +33,9 @@ from aroll_v21.decision.semantic_contracts import (
 from aroll_v21.evidence import CandidateEvidenceBuilder
 from aroll_v21.ingest import DraftIngest
 from aroll_v21.ir.models import Blocker, BlockerReport, RunReport, dataclass_to_dict
-from aroll_v21.quality import VisualPacingNormalizer
+from aroll_v21.quality import VisualPacingNormalizer, build_visual_pacing_report
 from aroll_v21.quality.final_caption_visible_repeat import build_final_caption_visible_repeat_gate
+from aroll_v21.quality.final_visible_caption_repair import repair_final_visible_caption_issues
 from aroll_v21.quality.quality_gate import build_quality_gate_report
 from aroll_v21.quality.repeat_span_repair import self_repair_aborted_phrase_candidate
 from aroll_v21.render import SubtitleRenderer
@@ -35,7 +43,7 @@ from aroll_v21.validate import ReadOnlyValidators
 from aroll_v21.writer import CaptionMaterialWriter
 
 
-FINAL_TARGET_PROVIDER_FAILURE_CODE = "V21_SEMANTIC_ADJUDICATION_PROVIDER_FAILED"
+FINAL_TARGET_PROVIDER_FAILURE_CODE = SEMANTIC_BATCH_PROVIDER_FAILED_CODE
 AUTO_PROVIDER_ROUTING_SKIPPED_CODE = "V21_AUTO_PROVIDER_ROUTING_SKIPPED_REQUIRED_REQUEST"
 FINAL_TARGET_PROVIDER_BLOCKER_CODES = {
     "FINAL_TARGET_REPEAT_SEMANTIC_DECISION_REQUIRED",
@@ -44,6 +52,9 @@ FINAL_TARGET_PROVIDER_BLOCKER_CODES = {
     FINAL_TARGET_PROVIDER_FAILURE_CODE,
     AUTO_PROVIDER_ROUTING_SKIPPED_CODE,
     "SEMANTIC_DECISION_NOT_PROVIDED",
+    SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
+    SEMANTIC_BATCH_PROVIDER_FAILED_CODE,
+    SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW_CODE,
     "DEEPSEEK_DECISION_HAS_PHYSICAL_FIELDS",
     "SEMANTIC_DECISION_SCHEMA_INVALID",
 }
@@ -176,6 +187,25 @@ class ArollEngine:
         final_timeline = self._drop_deterministic_self_repair_aborted_segments(final_timeline, decision_plan)
         final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
         captions = self.renderer.render(final_timeline, source_graph)
+        final_visible_repair = repair_final_visible_caption_issues(
+            final_timeline=final_timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda timeline: self.renderer.render(timeline, source_graph),
+        )
+        final_timeline = final_visible_repair.final_timeline
+        captions = final_visible_repair.captions
+        if int(final_visible_repair.report.get("final_visible_repair_action_count") or 0) > 0:
+            visual_pacing_report = build_visual_pacing_report(
+                final_timeline=final_timeline,
+                captions=captions,
+                executed=True,
+                source_graph=source_graph,
+                merge_report={
+                    **dict(visual_pacing_report or {}),
+                    "final_visible_repair_action_count": int(final_visible_repair.report.get("final_visible_repair_action_count") or 0),
+                },
+            )
         self._sync_semantic_gate_with_final_output(decision_plan, final_timeline, captions)
         self._refresh_semantic_adjudication_report(decision_plan)
         blockers.extend(decision_plan.blockers)
@@ -203,6 +233,7 @@ class ArollEngine:
             postwrite_materials=inputs.postwrite_materials,
             postwrite_mode=inputs.postwrite_mode,
         )
+        validator_report["final_visible_caption_repair_report"] = final_visible_repair.report
         validator_report = self._attach_final_caption_visible_repeat_gate(validator_report, captions)
         consistency_blockers = self._semantic_request_consistency_blockers(decision_plan, validator_report)
         if consistency_blockers:
@@ -247,6 +278,20 @@ class ArollEngine:
                 "deepseek_provider_configured": bool(semantic_adjudication_report.get("deepseek_provider_configured")),
                 "deepseek_provider_called_count": int(semantic_adjudication_report.get("deepseek_provider_called_count") or 0),
                 "deepseek_provider_error": str(semantic_adjudication_report.get("deepseek_provider_error") or ""),
+                "deepseek_batch_enabled": bool(semantic_adjudication_report.get("deepseek_batch_enabled")),
+                "deepseek_batch_request_count": int(semantic_adjudication_report.get("deepseek_batch_request_count") or 0),
+                "deepseek_batch_attempt_count": int(semantic_adjudication_report.get("deepseek_batch_attempt_count") or 0),
+                "deepseek_batch_retry_count": int(semantic_adjudication_report.get("deepseek_batch_retry_count") or 0),
+                "deepseek_batch_issue_count": int(semantic_adjudication_report.get("deepseek_batch_issue_count") or 0),
+                "deepseek_batch_resolved_count": int(semantic_adjudication_report.get("deepseek_batch_resolved_count") or 0),
+                "deepseek_batch_unresolved_count": int(semantic_adjudication_report.get("deepseek_batch_unresolved_count") or 0),
+                "deepseek_batch_missing_issue_ids": list(semantic_adjudication_report.get("deepseek_batch_missing_issue_ids") or []),
+                "deepseek_batch_error": str(semantic_adjudication_report.get("deepseek_batch_error") or ""),
+                "commit_reused_semantic_cache": bool(semantic_adjudication_report.get("commit_reused_semantic_cache")),
+                "semantic_cache_input_hash": str(semantic_adjudication_report.get("semantic_cache_input_hash") or ""),
+                "semantic_cache_issue_count": int(semantic_adjudication_report.get("semantic_cache_issue_count") or 0),
+                "semantic_cache_resolved_count": int(semantic_adjudication_report.get("semantic_cache_resolved_count") or 0),
+                "semantic_cache_unresolved_count": int(semantic_adjudication_report.get("semantic_cache_unresolved_count") or 0),
                 "deepseek_provider_skipped_count": int(semantic_adjudication_report.get("deepseek_provider_skipped_count") or 0),
                 "deepseek_provider_skipped_reasons": dict(semantic_adjudication_report.get("deepseek_provider_skipped_reasons") or {}),
                 "semantic_decision_cache_used": bool(semantic_adjudication_report.get("semantic_decision_cache_used")),
@@ -327,6 +372,10 @@ class ArollEngine:
                     "FINAL_MODIFIER_REDUNDANCY_REQUIRES_HUMAN_REVIEW",
                     "V21_FATAL_MODIFIER_REDUNDANCY_UNRESOLVED",
                     "V21_SEMANTIC_ADJUDICATION_PROVIDER_MISSING",
+                    "V21_SEMANTIC_BATCH_PROVIDER_MISSING",
+                    SEMANTIC_BATCH_PROVIDER_FAILED_CODE,
+                    SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
+                    SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW_CODE,
                 }
             )
         ]
@@ -401,6 +450,10 @@ class ArollEngine:
             "V21_FATAL_MODIFIER_REDUNDANCY_UNRESOLVED",
             "V21_SELF_REPAIR_ABORTED_PHRASE_UNRESOLVED",
             "V21_SEMANTIC_ADJUDICATION_PROVIDER_MISSING",
+            "V21_SEMANTIC_BATCH_PROVIDER_MISSING",
+            SEMANTIC_BATCH_PROVIDER_FAILED_CODE,
+            SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
+            SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW_CODE,
             FINAL_TARGET_PROVIDER_FAILURE_CODE,
             AUTO_PROVIDER_ROUTING_SKIPPED_CODE,
             "FINAL_TARGET_REPEAT_SEMANTIC_DECISION_REQUIRED",
@@ -431,6 +484,7 @@ class ArollEngine:
             and fatal_semantic_issue_count == 0
             and not blocker_codes
             and not str(report.get("deepseek_provider_error") or "")
+            and not str(report.get("deepseek_batch_error") or "")
             and bool(decision_plan.write_allowed)
         )
         report.update(
@@ -442,9 +496,25 @@ class ArollEngine:
                 "deepseek_provider_configured": bool(report.get("deepseek_provider_configured")),
                 "deepseek_provider_called_count": int(report.get("deepseek_provider_called_count") or 0),
                 "deepseek_provider_error": str(report.get("deepseek_provider_error") or ""),
+                "deepseek_batch_enabled": bool(report.get("deepseek_batch_enabled")),
+                "deepseek_batch_request_count": int(report.get("deepseek_batch_request_count") or 0),
+                "deepseek_batch_attempt_count": int(report.get("deepseek_batch_attempt_count") or 0),
+                "deepseek_batch_retry_count": int(report.get("deepseek_batch_retry_count") or 0),
+                "deepseek_batch_issue_count": int(report.get("deepseek_batch_issue_count") or 0),
+                "deepseek_batch_resolved_count": int(report.get("deepseek_batch_resolved_count") or 0),
+                "deepseek_batch_unresolved_count": int(report.get("deepseek_batch_unresolved_count") or 0),
+                "deepseek_batch_missing_issue_ids": list(report.get("deepseek_batch_missing_issue_ids") or []),
+                "deepseek_batch_error": str(report.get("deepseek_batch_error") or ""),
+                "deepseek_batch_chunk_count": int(report.get("deepseek_batch_chunk_count") or 0),
+                "deepseek_batch_chunk_sizes": list(report.get("deepseek_batch_chunk_sizes") or []),
                 "deepseek_provider_skipped_count": int(report.get("deepseek_provider_skipped_count") or 0),
                 "deepseek_provider_skipped_reasons": dict(report.get("deepseek_provider_skipped_reasons") or {}),
                 "semantic_decision_cache_used": bool(report.get("semantic_decision_cache_used")),
+                "commit_reused_semantic_cache": bool(report.get("commit_reused_semantic_cache")),
+                "semantic_cache_input_hash": str(report.get("semantic_cache_input_hash") or ""),
+                "semantic_cache_issue_count": int(report.get("semantic_cache_issue_count") or 0),
+                "semantic_cache_resolved_count": int(report.get("semantic_cache_resolved_count") or 0),
+                "semantic_cache_unresolved_count": int(report.get("semantic_cache_unresolved_count") or 0),
                 "semantic_auto_route_count": int(report.get("semantic_auto_route_count") or 0),
                 "semantic_local_decision_count": int(report.get("semantic_local_decision_count") or 0),
                 "semantic_provider_required_count": int(report.get("semantic_provider_required_count") or 0),
@@ -484,12 +554,14 @@ class ArollEngine:
         provider = self._semantic_adjudication_provider()
         if provider is None:
             return False
-        self._increment_deepseek_provider_called_count(decision_plan, len(provider_requests))
+        provider_called_before = int(getattr(provider, "provider_called_count", 0) or 0)
         try:
             decisions = list(provider.decide(provider_requests))
         except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            self._merge_deepseek_batch_metadata(decision_plan, provider, provider_called_before=provider_called_before)
             self._record_final_target_provider_error(decision_plan, provider_requests, str(exc))
             return False
+        self._merge_deepseek_batch_metadata(decision_plan, provider, provider_called_before=provider_called_before)
         return self._inject_final_target_provider_decisions(decision_plan, provider_requests, decisions)
 
     def _pending_final_target_repeat_payloads(self, decision_plan) -> list[dict[str, Any]]:
@@ -555,6 +627,54 @@ class ArollEngine:
         report["deepseek_provider_called_count"] = int(report.get("deepseek_provider_called_count") or 0) + int(count)
         report["deepseek_provider_error"] = str(report.get("deepseek_provider_error") or "")
 
+    def _merge_deepseek_batch_metadata(self, decision_plan, provider: Any, *, provider_called_before: int = 0) -> None:
+        report = decision_plan.semantic_adjudication_report
+        provider_called_after = int(getattr(provider, "provider_called_count", provider_called_before) or 0)
+        delta = max(0, provider_called_after - int(provider_called_before or 0))
+        if delta == 0:
+            delta = 1
+        self._increment_deepseek_provider_called_count(decision_plan, delta)
+        report["deepseek_batch_enabled"] = bool(getattr(provider, "deepseek_batch_enabled", report.get("deepseek_batch_enabled", False)))
+        numeric_fields = {
+            "deepseek_batch_request_count",
+            "deepseek_batch_attempt_count",
+            "deepseek_batch_retry_count",
+            "deepseek_batch_issue_count",
+            "deepseek_batch_resolved_count",
+            "deepseek_batch_unresolved_count",
+            "deepseek_batch_chunk_count",
+        }
+        list_fields = {
+            "deepseek_batch_missing_issue_ids",
+            "deepseek_batch_unknown_issue_ids",
+            "deepseek_batch_chunk_sizes",
+        }
+        dict_fields = {
+            "deepseek_batch_request",
+            "deepseek_batch_response",
+            "deepseek_batch_error_payload",
+        }
+        for field_name in BATCH_METADATA_FIELDS:
+            value = getattr(provider, field_name, None)
+            if value is None:
+                continue
+            if field_name in numeric_fields:
+                report[field_name] = int(report.get(field_name) or 0) + int(value or 0)
+            elif field_name in list_fields:
+                existing = list(report.get(field_name) or [])
+                if isinstance(value, list):
+                    report[field_name] = existing + value
+            elif field_name in dict_fields:
+                if value:
+                    existing_value = report.get(field_name)
+                    if existing_value:
+                        report[field_name] = {"previous": existing_value, "latest": value}
+                    else:
+                        report[field_name] = value
+            elif field_name == "deepseek_batch_error":
+                if value:
+                    report[field_name] = str(value)
+
     def _record_final_target_provider_error(
         self,
         decision_plan,
@@ -604,7 +724,7 @@ class ArollEngine:
             if decision is None:
                 self._append_semantic_blocker_once(
                     decision_plan,
-                    code="SEMANTIC_DECISION_NOT_PROVIDED",
+                    code=SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
                     message="DeepSeek provider did not return a decision for this final target repeat request",
                     cluster_id=request.issue_id,
                     context={"issue_type": request.issue_type.value},
@@ -614,7 +734,7 @@ class ArollEngine:
                     request,
                     decision=None,
                     resolved=False,
-                    blocker_code="SEMANTIC_DECISION_NOT_PROVIDED",
+                    blocker_code=SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE,
                     message="DeepSeek provider did not return a decision for this final target repeat request",
                 )
                 continue
@@ -638,7 +758,7 @@ class ArollEngine:
                 continue
             row = self._final_target_semantic_decision_row(request, decision)
             if row is None:
-                blocker_code = "FINAL_TARGET_REPEAT_REQUIRES_HUMAN_REVIEW"
+                blocker_code = SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW_CODE
                 self._append_semantic_blocker_once(
                     decision_plan,
                     code=blocker_code,
@@ -1184,6 +1304,23 @@ class ArollEngine:
     ) -> dict[str, Any]:
         report = dict(validator_report)
         visible_repeat_gate = build_final_caption_visible_repeat_gate(list(captions))
+        repair_report = report.get("final_visible_caption_repair_report")
+        if isinstance(repair_report, dict) and bool(repair_report.get("final_visible_repair_attempted")):
+            visible_repeat_gate = dict(visible_repeat_gate)
+            visible_repeat_gate["final_visible_repair_success"] = bool(repair_report.get("final_visible_repair_success"))
+            visible_repeat_gate["final_visible_repair_unresolved_count"] = len(list(repair_report.get("final_visible_repair_unresolved") or []))
+            visible_repeat_gate["final_visible_repair_final_timeline_counts"] = dict(repair_report.get("final_visible_repair_final_timeline_counts") or {})
+            visible_repeat_gate["final_visible_effective_caption_count"] = int(repair_report.get("final_visible_effective_caption_count") or 0)
+            visible_repeat_gate["caption_only_materialized_merge_count"] = int(repair_report.get("caption_only_materialized_merge_count") or 0)
+            visible_repeat_gate["caption_only_consumed_caption_ids"] = list(repair_report.get("caption_only_consumed_caption_ids") or [])
+            visible_repeat_gate["caption_only_materialized_merges"] = list(repair_report.get("caption_only_materialized_merges") or [])
+        if isinstance(repair_report, dict) and bool(repair_report.get("final_visible_repair_attempted")) and not bool(repair_report.get("final_visible_repair_success")):
+            blocker_codes = list(visible_repeat_gate.get("blocker_codes") or [])
+            for code in ("V21_FINAL_CAPTION_VISIBLE_REPEAT_GATE_FAILED", "V21_FINAL_VISIBLE_REPAIR_UNRESOLVED"):
+                if code not in blocker_codes:
+                    blocker_codes.append(code)
+            visible_repeat_gate["gate_passed"] = False
+            visible_repeat_gate["blocker_codes"] = blocker_codes
         report["final_caption_visible_repeat_gate"] = visible_repeat_gate
         previous_quality = report.get("quality_gate_report")
         quality_ok = True
@@ -1204,8 +1341,12 @@ class ArollEngine:
         return report
 
 
-def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
+def write_run_artifacts(run_report: RunReport, output_dir: Path, *, report_profile: str = "standard") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    profile = str(report_profile or "standard").strip().lower()
+    if profile not in {"minimal", "standard", "debug"}:
+        profile = "standard"
+    effective_profile = "debug" if profile == "standard" and run_report.status != "ok" else profile
     blocked_by_stage = str((run_report.blocker_report.summary or {}).get("stage") or "")
     blocked_by_codes = [blocker.code for blocker in (run_report.blocker_report.blockers if run_report.blocker_report else [])]
 
@@ -1268,6 +1409,8 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
     if not run_report.validator_report:
         validator_payload = not_reached("ReadOnlyValidators")
         postwrite_payload = not_reached("PostwriteVerification")
+    if effective_profile != "debug":
+        postwrite_payload = _compact_runtime_report_payload(postwrite_payload)
 
     decision_plan = run_report.decision_plan
     local_policy_decisions = []
@@ -1284,6 +1427,7 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
             if str(getattr(item, "source", "")) == "deepseek_semantic_planner"
         ]
     resolved_semantic_rows = _resolved_semantic_decision_rows(decision_plan)
+    semantic_report_payload = run_report.decision_plan.semantic_adjudication_report if run_report.decision_plan else {}
     artifacts = {
         "source_graph.json": run_report.source_graph,
         "edit_units.json": run_report.source_graph.edit_units if run_report.source_graph else [],
@@ -1293,7 +1437,14 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
         "semantic_decisions.json": (run_report.decision_plan.semantic_decision_rows if run_report.decision_plan else []),
         "semantic_decisions.resolved.json": resolved_semantic_rows,
         "semantic_decision_cache.json": resolved_semantic_rows,
-        "semantic_adjudication_report.json": (run_report.decision_plan.semantic_adjudication_report if run_report.decision_plan else {}),
+        "semantic_adjudication_report.json": semantic_report_payload,
+        "deepseek_batch_request.json": semantic_report_payload.get("deepseek_batch_request") or {},
+        "deepseek_batch_response.json": semantic_report_payload.get("deepseek_batch_response") or {},
+        "deepseek_batch_error.json": semantic_report_payload.get("deepseek_batch_error_payload") or (
+            {"error": semantic_report_payload.get("deepseek_batch_error")}
+            if semantic_report_payload.get("deepseek_batch_error")
+            else {}
+        ),
         "final_timeline.json": final_timeline_payload,
         "final_edl.json": final_edl_payload,
         "captions.json": captions_payload,
@@ -1302,6 +1453,7 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
         "validator_report.json": validator_payload,
         "postwrite_report.json": postwrite_payload,
         "final_caption_visible_repeat_gate.json": (validator_payload or {}).get("final_caption_visible_repeat_gate") if isinstance(validator_payload, dict) else not_reached("FinalCaptionVisibleRepeatGate"),
+        "final_visible_caption_repair_report.json": (validator_payload or {}).get("final_visible_caption_repair_report") if isinstance(validator_payload, dict) else not_reached("FinalVisibleCaptionRepair"),
         "quality_gate_report.json": (validator_payload or {}).get("quality_gate_report") if isinstance(validator_payload, dict) else not_reached("QualityGate"),
         "blocker_report.json": run_report.blocker_report,
         "decision_trace.json": run_report.decision_trace,
@@ -1310,8 +1462,60 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path) -> None:
         "run_summary.json": build_run_summary(run_report),
         "run_report.json": run_report,
     }
+    compressed_artifacts: dict[str, Any] = {}
+    if effective_profile == "minimal":
+        artifacts = {
+            "blocker_report.json": run_report.blocker_report,
+            "writeback_report.json": postwrite_payload,
+        }
+    elif effective_profile == "standard":
+        compressed_artifacts = {
+            "source_graph.json.gz": run_report.source_graph,
+            "validator_report.json.gz": validator_payload,
+        }
+        for debug_name in (
+            "run_report.json",
+            "source_graph.json",
+            "validator_report.json",
+            "deepseek_batch_request.json",
+            "deepseek_batch_response.json",
+        ):
+            artifacts.pop(debug_name, None)
+        if not semantic_report_payload.get("deepseek_batch_error"):
+            artifacts.pop("deepseek_batch_error.json", None)
     for name, payload in artifacts.items():
         (output_dir / name).write_text(json.dumps(dataclass_to_dict(payload), ensure_ascii=False, indent=2), "utf-8")
+    for name, payload in compressed_artifacts.items():
+        with gzip.open(output_dir / name, "wt", encoding="utf-8") as f:
+            json.dump(dataclass_to_dict(payload), f, ensure_ascii=False, separators=(",", ":"))
+
+
+COMPACT_RUNTIME_REPORT_DROP_KEYS = {
+    "post_write_actual_draft_audit",
+    "staged_post_write_actual_draft_audit",
+    "postwrite_actual_draft_audit",
+    "actual_draft_data",
+    "draft_data",
+}
+
+
+def _compact_runtime_report_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    compact: dict[str, Any] = {}
+    omitted: dict[str, dict[str, Any]] = {}
+    for key, value in payload.items():
+        if key in COMPACT_RUNTIME_REPORT_DROP_KEYS:
+            omitted[key] = {
+                "omitted": True,
+                "reason": "debug_payload_available_only_in_debug_report_profile",
+                "approx_json_bytes": len(json.dumps(dataclass_to_dict(value), ensure_ascii=False)),
+            }
+            continue
+        compact[key] = value
+    if omitted:
+        compact["compact_report_omitted_debug_payloads"] = omitted
+    return compact
 
 
 def _resolved_semantic_decision_rows(decision_plan) -> list[dict[str, Any]]:
@@ -1340,6 +1544,7 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
     final_repeat = validator.get("final_repeat_validator") or {}
     final_repeat_convergence = validator.get("final_repeat_convergence_gate") or {}
     final_caption_visible_repeat = validator.get("final_caption_visible_repeat_gate") or {}
+    final_visible_caption_repair = validator.get("final_visible_caption_repair_report") or {}
     hidden = validator.get("hidden_audio_repeat_validator") or {}
     safe_cut = validator.get("safe_cut_validator") or {}
     rough_cut = validator.get("rough_cut_quality_validator") or {}
@@ -1403,6 +1608,31 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
         )
         or ""
     )
+
+    def semantic_int(key: str) -> int:
+        return int(
+            semantic_report.get(key)
+            or semantic_gate.get(key)
+            or quality_gate.get(key)
+            or 0
+        )
+
+    def semantic_bool(key: str) -> bool:
+        return bool(
+            semantic_report.get(key)
+            if key in semantic_report
+            else semantic_gate.get(key)
+            if key in semantic_gate
+            else quality_gate.get(key)
+        )
+
+    def semantic_list(key: str) -> list[Any]:
+        value = semantic_report.get(key) or semantic_gate.get(key) or quality_gate.get(key) or []
+        return list(value) if isinstance(value, list) else []
+
+    def semantic_str(key: str) -> str:
+        return str(semantic_report.get(key) or semantic_gate.get(key) or quality_gate.get(key) or "")
+
     deepseek_provider_skipped_count = int(
         semantic_report.get("deepseek_provider_skipped_count")
         or semantic_gate.get("deepseek_provider_skipped_count")
@@ -1529,6 +1759,20 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
         "deepseek_provider_configured": deepseek_provider_configured,
         "deepseek_provider_called_count": deepseek_provider_called_count,
         "deepseek_provider_error": deepseek_provider_error,
+        "deepseek_batch_enabled": semantic_bool("deepseek_batch_enabled"),
+        "deepseek_batch_request_count": semantic_int("deepseek_batch_request_count"),
+        "deepseek_batch_attempt_count": semantic_int("deepseek_batch_attempt_count"),
+        "deepseek_batch_retry_count": semantic_int("deepseek_batch_retry_count"),
+        "deepseek_batch_issue_count": semantic_int("deepseek_batch_issue_count"),
+        "deepseek_batch_resolved_count": semantic_int("deepseek_batch_resolved_count"),
+        "deepseek_batch_unresolved_count": semantic_int("deepseek_batch_unresolved_count"),
+        "deepseek_batch_missing_issue_ids": semantic_list("deepseek_batch_missing_issue_ids"),
+        "deepseek_batch_error": semantic_str("deepseek_batch_error"),
+        "commit_reused_semantic_cache": semantic_bool("commit_reused_semantic_cache"),
+        "semantic_cache_input_hash": semantic_str("semantic_cache_input_hash"),
+        "semantic_cache_issue_count": semantic_int("semantic_cache_issue_count"),
+        "semantic_cache_resolved_count": semantic_int("semantic_cache_resolved_count"),
+        "semantic_cache_unresolved_count": semantic_int("semantic_cache_unresolved_count"),
         "deepseek_provider_not_called_reason": _deepseek_provider_not_called_reason(
             semantic_mode=semantic_mode,
             provider_configured=deepseek_provider_configured,
@@ -1580,10 +1824,28 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
         "near_duplicate_visible_caption_count": int(final_caption_visible_repeat.get("near_duplicate_visible_caption_count") or 0),
         "modifier_redundancy_residual_count": int(final_caption_visible_repeat.get("modifier_redundancy_residual_count") or 0),
         "self_repair_aborted_phrase_count": int(final_caption_visible_repeat.get("self_repair_aborted_phrase_count") or 0),
+        "dangling_prefix_suffix_count": int(final_caption_visible_repeat.get("dangling_prefix_suffix_count") or 0),
+        "semantic_garbage_or_asr_suspect_count": int(final_caption_visible_repeat.get("semantic_garbage_or_asr_suspect_count") or 0),
+        "cross_caption_semantic_containment_count": int(final_caption_visible_repeat.get("cross_caption_semantic_containment_count") or 0),
+        "restart_repeat_visible_count": int(final_caption_visible_repeat.get("restart_repeat_visible_count") or 0),
+        "final_visible_repair_attempted": bool(final_visible_caption_repair.get("final_visible_repair_attempted")),
+        "final_visible_repair_success": bool(final_visible_caption_repair.get("final_visible_repair_success")),
+        "final_visible_repair_action_count": int(final_visible_caption_repair.get("final_visible_repair_action_count") or 0),
+        "final_visible_repair_initial_counts": dict(final_visible_caption_repair.get("final_visible_repair_initial_counts") or {}),
+        "final_visible_repair_final_counts": dict(final_visible_caption_repair.get("final_visible_repair_final_counts") or {}),
+        "final_visible_repair_final_timeline_counts": dict(final_visible_caption_repair.get("final_visible_repair_final_timeline_counts") or {}),
+        "final_visible_effective_caption_count": int(final_visible_caption_repair.get("final_visible_effective_caption_count") or 0),
+        "caption_only_materialized_merge_count": int(final_visible_caption_repair.get("caption_only_materialized_merge_count") or 0),
+        "caption_only_consumed_caption_ids": list(final_visible_caption_repair.get("caption_only_consumed_caption_ids") or []),
+        "final_visible_repair_unresolved": list(final_visible_caption_repair.get("final_visible_repair_unresolved") or []),
         "final_caption_visible_repeat_blocker_codes": list(final_caption_visible_repeat.get("blocker_codes") or []),
         "final_caption_visible_repeat_candidates": list(final_caption_visible_repeat.get("visible_repeat_candidates") or []),
         "modifier_redundancy_residual_candidates": list(final_caption_visible_repeat.get("modifier_redundancy_residual_candidates") or []),
         "self_repair_aborted_phrase_candidates": list(final_caption_visible_repeat.get("self_repair_aborted_phrase_candidates") or []),
+        "dangling_prefix_suffix_candidates": list(final_caption_visible_repeat.get("dangling_prefix_suffix_candidates") or []),
+        "semantic_garbage_or_asr_suspect_candidates": list(final_caption_visible_repeat.get("semantic_garbage_or_asr_suspect_candidates") or []),
+        "cross_caption_semantic_containment_candidates": list(final_caption_visible_repeat.get("cross_caption_semantic_containment_candidates") or []),
+        "restart_repeat_visible_candidates": list(final_caption_visible_repeat.get("restart_repeat_visible_candidates") or []),
         "visual_pacing_gate_passed": bool(visual_pacing.get("gate_passed")),
         "visual_pacing_executed": bool(visual_pacing.get("visual_pacing_executed")),
         "visual_pacing_merge_attempted_count": int(visual_pacing.get("visual_pacing_merge_attempted_count") or 0),

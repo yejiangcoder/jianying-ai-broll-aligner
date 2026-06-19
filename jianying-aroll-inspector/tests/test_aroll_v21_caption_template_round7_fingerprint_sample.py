@@ -9,7 +9,7 @@ from aroll_v21.ir import CaptionRenderUnit
 from aroll_v21.writer import CaptionMaterialWriter
 
 
-FONT_PATH = "<sample-font-path>/zh-hans.ttf"
+FONT_PATH = "fonts/zh-hans.ttf"
 
 
 def _base_content(text: str) -> dict:

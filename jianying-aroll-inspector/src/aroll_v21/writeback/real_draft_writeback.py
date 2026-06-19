@@ -14,8 +14,8 @@ from jy_bridge import (
     decrypt,
     assert_timeline_content_id,
     encrypt,
-    root_mirrors_timeline_id,
 )
+from aroll_root_mirror import root_mirror_report_from_exception, root_mirrors_timeline_id
 
 from aroll_v21.ingest.real_draft_adapter import RealDraftIngestResult
 from aroll_v21.ir.models import Blocker, CaptionRenderUnit, FinalTimelineSegment, RunReport
@@ -242,6 +242,12 @@ class RealDraftWriteback:
         except Exception as exc:
             root_mirror_check_failed = True
             root_mirror_error = str(exc)
+            detection_report = root_mirror_report_from_exception(
+                exc,
+                draft_dir,
+                timeline_id,
+            )
+            self._write_root_mirror_detection_report(run_dir, detection_report)
             return self._blocked(
                 "V21_WRITEBACK_ROOT_MIRROR_DETECTION_FAILED",
                 "root mirror requirement could not be determined safely",
@@ -252,6 +258,7 @@ class RealDraftWriteback:
                     "root_mirror_error": root_mirror_error,
                     "root_mirror_synced": False,
                     "root_mirror_targets": [],
+                    "root_mirror_detection_report": detection_report,
                 },
             )
         targets = [draft_content_path, template_path]
@@ -2380,6 +2387,16 @@ class RealDraftWriteback:
             blockers=[Blocker(code=code, message=message, layer="writeback", context=report)],
             report=report | {"writeback_success": False, "block_reason": code},
         )
+
+    def _write_root_mirror_detection_report(self, run_dir: Path, report: dict[str, Any]) -> None:
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "root_mirror_detection_report.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError as exc:
+            report["report_write_error"] = str(exc)
 
     def _base_report(
         self,

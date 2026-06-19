@@ -11,24 +11,20 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from aroll_runtime_paths import get_aligner_root, get_aroll_runs_dir
 
-SUITE_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ALIGNER_ROOT = SUITE_ROOT / "jianying-ai-image-aligner"
+DEFAULT_ALIGNER_ROOT = get_aligner_root()
 
 
 def _aligner_root() -> Path:
-    configured = os.environ.get("JY_ALIGNER_ROOT", "").strip()
-    return Path(configured) if configured else DEFAULT_ALIGNER_ROOT
+    return get_aligner_root()
 
 
 ALIGNER_ROOT = _aligner_root()
 ALIGNER_SRC = ALIGNER_ROOT / "src"
 AI_TRACK_NAME = os.environ.get("JY_AI_TRACK_NAME", "AI_BROLL")
 DEFAULT_JY_DRAFTC = Path(os.environ.get("JY_DRAFTC") or os.environ.get("JY_DRAFTC_EXE") or "JianyingPro")
-DEFAULT_RUNTIME = Path(
-    os.environ.get("AUTO_CLIP_AROLL_RUNS_DIR")
-    or (Path(os.environ.get("AUTO_CLIP_RUNTIME_DIR") or (Path.home() / ".auto_clip_runtime")) / "arll" / "runs")
-)
+DEFAULT_RUNTIME = get_aroll_runs_dir()
 
 _BRIDGE_MODULE: ModuleType | None = None
 
@@ -120,7 +116,9 @@ def resolve_timeline_id(*args: Any, **kwargs: Any) -> Any:
 
 
 def root_mirrors_timeline_id(*args: Any, **kwargs: Any) -> Any:
-    return _bridge_attr("root_mirrors_timeline_id")(*args, **kwargs)
+    from aroll_root_mirror import root_mirrors_timeline_id as detect_root_mirror
+
+    return detect_root_mirror(*args, **kwargs)
 
 
 def assert_all_project_timeline_files_match_folder_ids(*args: Any, **kwargs: Any) -> Any:

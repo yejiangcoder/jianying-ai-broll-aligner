@@ -224,6 +224,9 @@ class FinalTargetRepeatResolver:
                             "reason": str(row.get("reason") or "explicit semantic keep_all"),
                         }
                     )
+                    matched_request_id = str(row.get("_matched_request_cluster_id") or "")
+                    if matched_request_id:
+                        resolved_ids.add(matched_request_id)
                     continue
 
                 if decision == "requires_human_review" or bool(row.get("requires_human_review")):
@@ -249,6 +252,10 @@ class FinalTargetRepeatResolver:
                 if semantic_drop_indices:
                     unresolved_ids.discard(cluster_id)
                     resolved_ids.add(cluster_id)
+                    matched_request_id = str(row.get("_matched_request_cluster_id") or "")
+                    if matched_request_id:
+                        unresolved_ids.discard(matched_request_id)
+                        resolved_ids.add(matched_request_id)
                     decision_plan.decision_trace.append(
                         {
                             "route": "final_target_repeat",
@@ -291,6 +298,22 @@ class FinalTargetRepeatResolver:
                 current = self._repack([segment for index, segment in enumerate(current) if index not in dropped_indices])
                 continue
             break
+
+        current_cluster_ids = {self._cluster_id(cluster) for cluster in self._clusters(current)}
+        stale_unresolved_ids = {cluster_id for cluster_id in unresolved_ids if cluster_id not in current_cluster_ids}
+        if stale_unresolved_ids:
+            for cluster_id in sorted(stale_unresolved_ids):
+                decision_plan.decision_trace.append(
+                    {
+                        "route": "final_target_repeat",
+                        "cluster_id": cluster_id,
+                        "decision": "resolved_stale_semantic_request",
+                        "applied": True,
+                        "source": "final_timeline_convergence",
+                        "reason": "semantic repeat cluster no longer exists after final target repeat convergence",
+                    }
+                )
+            resolved_ids.update(stale_unresolved_ids)
 
         if resolved_ids:
             self._clear_resolved_semantic_requests(decision_plan, resolved_ids)
@@ -421,7 +444,12 @@ class FinalTargetRepeatResolver:
 
     def _is_semantic_final_target_candidate(self, cluster: dict[str, Any]) -> bool:
         return (
-            str(cluster.get("cluster_type") or "") == "semantic_containment_take"
+            str(cluster.get("cluster_type") or "") in {
+                "semantic_containment_take",
+                "restart_take",
+                "ambiguous_repeat",
+                "near_duplicate_take",
+            }
             and str(cluster.get("confidence") or "") in {"medium", "high", "fatal"}
             and bool(cluster.get("requires_llm"))
             and not cluster.get("recommended_drop_index")
@@ -444,9 +472,18 @@ class FinalTargetRepeatResolver:
         return raw if raw.startswith("final_target_repeat_") else f"final_target_repeat_{raw}"
 
     def _semantic_decision_row(self, decision_plan: DecisionPlan, cluster_id: str, cluster: dict[str, Any]) -> dict[str, Any] | None:
+        rows_by_id: dict[str, dict[str, Any]] = {}
         for row in decision_plan.semantic_decision_rows:
-            if str(row.get("cluster_id") or "") == cluster_id:
+            if not isinstance(row, dict):
+                continue
+            row_cluster_id = str(row.get("cluster_id") or row.get("issue_id") or "")
+            if row_cluster_id:
+                rows_by_id[row_cluster_id] = row
+            if row_cluster_id == cluster_id:
                 return row
+        matched = self._semantic_decision_row_by_text_pair(decision_plan, cluster, rows_by_id)
+        if matched is not None:
+            return matched
         if self.baseline_policy.is_enabled(decision_plan):
             return self.baseline_policy.decision_for_missing_cluster(
                 cluster_id,
@@ -460,6 +497,53 @@ class FinalTargetRepeatResolver:
             )
         return None
 
+    def _semantic_decision_row_by_text_pair(
+        self,
+        decision_plan: DecisionPlan,
+        cluster: dict[str, Any],
+        rows_by_id: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        cluster_pair = self._cluster_text_pair(cluster)
+        if cluster_pair is None:
+            return None
+        for payload in decision_plan.semantic_request_payloads:
+            if not isinstance(payload, dict):
+                continue
+            payload_id = str(payload.get("cluster_id") or payload.get("issue_id") or "")
+            if not payload_id:
+                continue
+            row = rows_by_id.get(payload_id)
+            if row is None:
+                continue
+            if self._payload_text_pair(payload) != cluster_pair:
+                continue
+            matched = dict(row)
+            matched["_matched_request_cluster_id"] = payload_id
+            return matched
+        return None
+
+    def _cluster_text_pair(self, cluster: dict[str, Any]) -> tuple[str, str] | None:
+        items = [item for item in list(cluster.get("items") or []) if isinstance(item, dict)]
+        if len(items) < 2:
+            return None
+        left = normalize_text(str(items[0].get("text") or items[0].get("subtitle_text") or ""))
+        right = normalize_text(str(items[1].get("text") or items[1].get("subtitle_text") or ""))
+        if not left or not right:
+            return None
+        return left, right
+
+    def _payload_text_pair(self, payload: dict[str, Any]) -> tuple[str, str] | None:
+        candidates = [item for item in list(payload.get("candidates") or []) if isinstance(item, dict)]
+        if len(candidates) >= 2:
+            left = normalize_text(str(candidates[0].get("text") or ""))
+            right = normalize_text(str(candidates[1].get("text") or ""))
+        else:
+            left = normalize_text(str(payload.get("left_text") or payload.get("text_before") or payload.get("text") or ""))
+            right = normalize_text(str(payload.get("right_text") or payload.get("text_after") or ""))
+        if not left or not right:
+            return None
+        return left, right
+
     def _append_semantic_request(self, decision_plan: DecisionPlan, cluster: dict[str, Any], cluster_id: str) -> None:
         existing = {str(row.get("cluster_id") or "") for row in decision_plan.semantic_request_payloads}
         if cluster_id in existing:
@@ -471,6 +555,8 @@ class FinalTargetRepeatResolver:
             issue_type = "visible_caption_repeat"
         elif cluster_type == "near_duplicate_take":
             issue_type = "near_duplicate_take"
+        elif cluster_type in {"restart_take", "ambiguous_repeat"}:
+            issue_type = "ambiguous_repeat"
         candidates = []
         for role, item in zip(("left", "right"), items[:2]):
             candidates.append(
@@ -506,7 +592,7 @@ class FinalTargetRepeatResolver:
                 "suggested_for_rough_cut": "no_decision",
                 "why_local_policy_cannot_decide": "final target repeat candidate requires semantic adjudication after final timeline compilation",
                 "required_decision_schema": {
-                    "decision": "keep_all | drop_left | drop_right | requires_human_review",
+                    "decision": "keep_all | drop_left | drop_right | keep_longest_drop_others | requires_human_review",
                     "reason": "",
                     "confidence": 0.0,
                     "requires_human_review": False,

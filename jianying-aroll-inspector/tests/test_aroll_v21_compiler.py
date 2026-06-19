@@ -156,7 +156,7 @@ class ArollV21CompilerTests(unittest.TestCase):
 
     def test_no_hardcoded_uat_terms_in_v21_src(self) -> None:
         terms = [
-            "样例角色甲",
+            "嘉豪",
             "数字游民",
             "螃蟹效应",
             "敢张",
