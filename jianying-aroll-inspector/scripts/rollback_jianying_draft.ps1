@@ -8,6 +8,8 @@ param(
 
   [string]$BaselinePath = "",
 
+  [string]$ExpectedSourceMediaRoot = "",
+
   [ValidateSet("auto", "initial-clean-cluster", "latest-clean-before-dirty")]
   [string]$SelectionMode = "auto",
 
@@ -30,11 +32,12 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Get-DefaultRuntimeRoot {
-  if ($env:AUTO_CLIP_RUNTIME_DIR) {
-    return [string]$env:AUTO_CLIP_RUNTIME_DIR
+if ([string]::IsNullOrWhiteSpace($RunRoot)) {
+  $runtimeRoot = [string]$env:AUTO_CLIP_RUNTIME_DIR
+  if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+    $runtimeRoot = Join-Path $env:USERPROFILE ".auto_clip_runtime"
   }
-  return (Join-Path $HOME ".auto_clip_runtime")
+  $RunRoot = Join-Path $runtimeRoot "draft_rollback_runs"
 }
 
 function Resolve-ExistingPath([string]$PathValue, [string]$Label) {
@@ -53,6 +56,12 @@ function Get-DefaultJyDraftc {
   }
   if ($env:JY_DRAFTC_EXE -and (Test-Path -LiteralPath $env:JY_DRAFTC_EXE)) {
     return [string]$env:JY_DRAFTC_EXE
+  }
+  $repoRoot = Split-Path -Parent $PSScriptRoot
+  $suiteRoot = Split-Path -Parent $repoRoot
+  $bundled = Join-Path $suiteRoot "jianying-ai-image-aligner\vendor\jy-draftc-bin\jy-draftc-amd64-windows\jy-draftc.exe"
+  if (Test-Path -LiteralPath $bundled) {
+    return $bundled
   }
   return ""
 }
@@ -150,12 +159,14 @@ if (-not (Test-Path -LiteralPath $analyzer)) {
 }
 
 $draftDirResolved = Resolve-ExistingPath $DraftDir "DraftDir"
+$userProvidedBaselinePath = [bool]$BaselinePath
 if (-not $JyDraftc) {
   $JyDraftc = Get-DefaultJyDraftc
 }
 $jyDraftcResolved = Resolve-ExistingPath $JyDraftc "JyDraftc"
-if ([string]::IsNullOrWhiteSpace($RunRoot)) {
-  $RunRoot = Join-Path (Get-DefaultRuntimeRoot) "draft_rollback_runs"
+$expectedSourceMediaRootResolved = ""
+if ($ExpectedSourceMediaRoot) {
+  $expectedSourceMediaRootResolved = Resolve-ExistingPath $ExpectedSourceMediaRoot "ExpectedSourceMediaRoot"
 }
 $backupRoot = Join-Path $draftDirResolved ".backup"
 if (-not (Test-Path -LiteralPath $backupRoot)) {
@@ -196,6 +207,9 @@ if ($BaselinePath) {
   $baselineResolved = Resolve-ExistingPath $BaselinePath "BaselinePath"
   $pythonArgs += @("--baseline-path", $baselineResolved)
 }
+if ($expectedSourceMediaRootResolved) {
+  $pythonArgs += @("--expected-source-media-root", $expectedSourceMediaRootResolved)
+}
 if ($KeepDecrypted) {
   $pythonArgs += "--keep-decrypted"
 }
@@ -228,17 +242,34 @@ $summary = [ordered]@{
   ACTIVE_DIRTY_TARGET_COUNT = [int]$report.active_dirty_target_count
   QUARANTINE_BACKUP_COUNT = [int]$report.quarantine_backup_count
   SELECTION_MODE = $SelectionMode
+  EXPECTED_SOURCE_MEDIA_ROOT = $expectedSourceMediaRootResolved
+  SELECTED_SOURCE_MEDIA_ROOT_OK = $selected.source_media_root_ok
+  SELECTED_SOURCE_MEDIA_ROOT_MISMATCHES = @($selected.source_media_root_mismatches)
 }
 
 if (-not $Apply) {
   $summary.ROLLBACK_DONE = $false
-  $summary.NEXT_COMMAND = "scripts/rollback_jianying_draft.ps1 -DraftDir `"$draftDirResolved`" -Apply -StopJianying"
+  $nextCommand = "scripts/rollback_jianying_draft.ps1 -DraftDir `"$draftDirResolved`" -Apply -StopJianying"
+  if ($expectedSourceMediaRootResolved) {
+    $nextCommand += " -ExpectedSourceMediaRoot `"$expectedSourceMediaRootResolved`""
+  }
+  $summary.NEXT_COMMAND = $nextCommand
   $summary | ConvertTo-Json -Depth 20
   return
 }
 
+if (-not $expectedSourceMediaRootResolved -and -not $Force) {
+  throw "Rollback Apply requires -ExpectedSourceMediaRoot to bind the baseline to the original media root. Rerun with -ExpectedSourceMediaRoot or explicit -Force."
+}
 if ($report.selection.confidence -eq "low" -and -not $Force) {
   throw "Rollback baseline confidence is low. Inspect $reportPath or rerun with -BaselinePath / -Force."
+}
+if ($report.selection.confidence -eq "medium" -and -not $Force -and -not $userProvidedBaselinePath) {
+  throw "Rollback baseline confidence is medium. Refusing automatic Apply; inspect $reportPath and rerun with explicit -BaselinePath or -Force."
+}
+if ($expectedSourceMediaRootResolved -and $selected.source_media_root_ok -ne $true) {
+  $mismatches = (@($selected.source_media_root_mismatches) -join ", ")
+  throw "Rollback selected baseline does not match ExpectedSourceMediaRoot=$expectedSourceMediaRootResolved. Mismatches: $mismatches. Inspect $reportPath."
 }
 
 $processes = @(Get-Process | Where-Object { $_.ProcessName -match "Jianying|CapCut|jianying|capcut" })
@@ -314,6 +345,9 @@ $verifyArgs = @(
   "--output-dir", $verifyDir,
   "--baseline-path", $baselineCopy
 )
+if ($expectedSourceMediaRootResolved) {
+  $verifyArgs += @("--expected-source-media-root", $expectedSourceMediaRootResolved)
+}
 if ($KeepDecrypted) {
   $verifyArgs += "--keep-decrypted"
 }
@@ -328,12 +362,19 @@ $verifyReportPath = Join-Path $verifyDir "rollback_candidate_report.json"
 $verifyReport = Read-JsonFile $verifyReportPath
 $hashMismatch = @($writtenTargets | Where-Object { -not $_.MatchesBaseline })
 $postDirtyTargets = @($verifyReport.active_targets | Where-Object { [int]$_.automation_marker_count -gt 0 })
+$postSourceMismatches = @()
+if ($expectedSourceMediaRootResolved) {
+  $postSourceMismatches = @($verifyReport.active_targets | Where-Object { $_.source_media_root_ok -ne $true })
+}
 
 if ($hashMismatch.Count -gt 0) {
   throw "Rollback verification failed: one or more active targets do not match selected baseline hash."
 }
 if ($postDirtyTargets.Count -gt 0) {
   throw "Rollback verification failed: one or more active targets still contain automation markers."
+}
+if ($postSourceMismatches.Count -gt 0) {
+  throw "Rollback verification failed: one or more active targets do not match ExpectedSourceMediaRoot=$expectedSourceMediaRootResolved."
 }
 
 New-Item -ItemType Directory -Force -Path $baselineRegistry | Out-Null
@@ -349,6 +390,7 @@ $registryManifest = [ordered]@{
   created_at = (Get-Date).ToString("s")
   run_dir = $runDirResolved
   selection_mode = $SelectionMode
+  expected_source_media_root = $expectedSourceMediaRootResolved
 }
 $registryManifestPath = Join-Path $baselineSlot "baseline_manifest.json"
 $registryManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $registryManifestPath -Encoding UTF8
@@ -370,6 +412,8 @@ $result = [ordered]@{
   ACTIVE_DIRTY_TARGET_COUNT_AFTER = 0
   ACTIVE_VIDEO_SEGMENTS_AFTER = @($verifyReport.active_targets | Where-Object { $_.path -like "*draft_content.json" } | Select-Object -First 1 -ExpandProperty video_segments)
   ACTIVE_TEXT_SEGMENTS_AFTER = @($verifyReport.active_targets | Where-Object { $_.path -like "*draft_content.json" } | Select-Object -First 1 -ExpandProperty text_segments)
+  EXPECTED_SOURCE_MEDIA_ROOT = $expectedSourceMediaRootResolved
+  SELECTED_SOURCE_MEDIA_ROOT_OK = $selected.source_media_root_ok
   QUARANTINE_DIR = $quarantineRootResolved
   BASELINE_REGISTRY_MANIFEST = $registryManifestPath
 }

@@ -1,6 +1,6 @@
 # Project Layout
 
-`<repo>\jianying-aroll-inspector` is the lightweight source directory.
+`<suite-root>\jianying-aroll-inspector` is the lightweight source directory.
 
 Keep in this directory:
 

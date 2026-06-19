@@ -7,6 +7,10 @@ from typing import Any
 from aroll_text_normalize import normalize_text
 from aroll_v21.contracts import VisualMergeGroup, VisualMergeSafetyReport, VisualPacingReport, contract_to_dict
 from aroll_v21.ir.models import CaptionRenderUnit, CanonicalSourceGraph, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import (
+    boundary_suffix_prefix_overlap,
+    is_semantic_label_reuse_boundary,
+)
 from aroll_v21.quality.safe_boundary import trailing_word_ids_for_suffix_overlap
 from aroll_v21.quality.tiny_segment_classifier import classify_tiny_segment
 
@@ -957,6 +961,8 @@ def _drop_boundary_suffix_prefix_overlaps(
             overlap = _boundary_suffix_prefix_overlap(left.text, right.text)
             if len(overlap) < 2:
                 continue
+            if is_semantic_label_reuse_boundary(left.text, right.text, overlap):
+                continue
             drop_ids = _trailing_word_ids_for_overlap(left, word_lookup, overlap)
             if not drop_ids or len(drop_ids) >= len(left.word_ids):
                 continue
@@ -970,14 +976,7 @@ def _drop_boundary_suffix_prefix_overlaps(
 
 
 def _boundary_suffix_prefix_overlap(left_text: str, right_text: str) -> str:
-    left = normalize_text(str(left_text or ""))
-    right = normalize_text(str(right_text or ""))
-    max_size = min(len(left), len(right), 20)
-    for size in range(max_size, 1, -1):
-        candidate = left[-size:]
-        if right.startswith(candidate):
-            return candidate
-    return ""
+    return boundary_suffix_prefix_overlap(left_text, right_text, max_size=20)
 
 
 def _trailing_word_ids_for_overlap(

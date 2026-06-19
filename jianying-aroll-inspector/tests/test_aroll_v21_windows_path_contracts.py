@@ -9,6 +9,7 @@ from unittest.mock import patch
 from aroll_v21.operator import ArollV21OperatorConfig, run_operator
 from aroll_runtime_paths import (
     get_aroll_audits_dir,
+    get_aroll_quality_defect_ledger_dir,
     get_aroll_runs_dir,
     get_aroll_test_outputs_dir,
     get_runtime_root,
@@ -27,17 +28,18 @@ class ArollV21WindowsPathContractsTests(unittest.TestCase):
                 "AUTO_CLIP_AROLL_RUNS_DIR": "",
                 "AUTO_CLIP_AROLL_AUDITS_DIR": "",
                 "AUTO_CLIP_AROLL_TEST_OUTPUTS_DIR": "",
+                "AUTO_CLIP_AROLL_QUALITY_DEFECT_LEDGER_DIR": "",
             },
             clear=False,
         ), patch("aroll_runtime_paths.LOCAL_CONFIG", Path("__missing_runtime_paths.local.yaml")), patch(
             "aroll_runtime_paths.EXAMPLE_CONFIG",
             Path("__missing_runtime_paths.example.yaml"),
         ):
-            runtime_root = Path.home() / ".auto_clip_runtime"
-            self.assertEqual(get_runtime_root(), runtime_root)
-            self.assertEqual(get_aroll_runs_dir(), runtime_root / "aroll_v21_uat_runs")
-            self.assertEqual(get_aroll_audits_dir(), runtime_root / "aroll_v21_audits")
-            self.assertEqual(get_aroll_test_outputs_dir(), runtime_root / "aroll_v21_test_outputs")
+            self.assertEqual(get_runtime_root(), Path("D:/auto_clip_runtime"))
+            self.assertEqual(get_aroll_runs_dir(), Path("D:/auto_clip_runtime/aroll_v21_uat_runs"))
+            self.assertEqual(get_aroll_audits_dir(), Path("D:/auto_clip_runtime/aroll_v21_audits"))
+            self.assertEqual(get_aroll_test_outputs_dir(), Path("D:/auto_clip_runtime/aroll_v21_test_outputs"))
+            self.assertEqual(get_aroll_quality_defect_ledger_dir(), Path("D:/auto_clip_runtime/aroll_v21_audits/quality_defect_ledger"))
 
     def test_paths_with_spaces_and_chinese_are_preserved_in_summary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="路径 with spaces ") as tmp:
@@ -88,7 +90,7 @@ class ArollV21WindowsPathContractsTests(unittest.TestCase):
     def test_runtime_migration_reports_default_to_external_audit_root(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "tools" / "migrate_runtime.py").read_text("utf-8")
-        self.assertNotIn("ar" + "ll", source)
+        self.assertNotIn("arll", source)
         self.assertIn("default=DEFAULT_AUDIT_ROOT", source)
         self.assertIn('"reports": ("aroll_v21_audits",)', source)
 

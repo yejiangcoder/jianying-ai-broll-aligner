@@ -8,6 +8,11 @@ from aroll_v21.ir.models import CanonicalSourceGraph, CaptionRenderUnit, FinalTi
 from aroll_v21.quality.final_caption_visible_repeat import (
     FINAL_VISIBLE_RECHECK_DECISIONS,
     build_final_caption_visible_repeat_gate,
+    _dangling_pronoun_modal_suffix,
+)
+from aroll_v21.quality.pre_visible_semantic_junk_candidate_detector import (
+    MIN_HIGH_CONFIDENCE as PRE_VISIBLE_SEMANTIC_JUNK_MIN_HIGH_CONFIDENCE,
+    build_pre_visible_semantic_junk_candidate_report,
 )
 from aroll_v21.quality.subtitle_readability import HARD_MAX_CHARS, HARD_MAX_DURATION_US
 from aroll_v21.quality.tiny_segment_classifier import classify_tiny_segment
@@ -19,7 +24,7 @@ FINAL_VISIBLE_REPAIR_COUNT_KEYS = (
     "cross_caption_semantic_containment_count",
     "restart_repeat_visible_count",
 )
-MAX_FINAL_VISIBLE_REPAIR_PASSES = 32
+MAX_FINAL_VISIBLE_REPAIR_PASSES = 128
 MAX_CAPTION_ONLY_TARGET_GAP_US = 120_000
 MAX_SOURCE_BOUNDARY_PREFIX_GAP_US = 600_000
 MAX_SOURCE_BOUNDARY_COMPOUND_GAP_US = 120_000
@@ -47,6 +52,23 @@ MIN_ISOLATED_SHORT_FRAGMENT_NEIGHBOR_CHARS = 6
 MIN_REPAIRED_SEGMENT_DURATION_US = 1_200_000
 MAX_REPAIRED_RESIDUAL_DROP_DURATION_US = 500_000
 MAX_REPAIRED_RESIDUAL_DROP_CHARS = 2
+MIN_REBALANCED_CAPTION_DURATION_US = 300_000
+MIN_TRANSFERRED_PREFIX_TARGET_US = 80_000
+MAX_TRANSFERRED_PREFIX_TARGET_US = 500_000
+LEADING_FILLER_WORDS = ("咳", "嗯", "呃", "啊", "哎", "唉", "诶", "额", "呐", "喂")
+MIN_LEADING_FILLER_GAP_US = 700_000
+MAX_LEADING_FILLER_DURATION_US = 900_000
+MIN_LEADING_FILLER_REMAINING_CHARS = 4
+CONNECTOR_INTRUSION_NEXT_WORDS = ("所以", "但是", "然后", "因为", "就是", "其实")
+MIN_CONNECTOR_INTRUSION_SIDE_GAP_US = 180_000
+MAX_CONNECTOR_INTRUSION_WORD_DURATION_US = 450_000
+MIN_CONNECTOR_INTRUSION_REMAINING_CHARS = 6
+CONNECTOR_RESTART_WORDS = ("但", "但是", "可", "可是", "那", "那么", "然后", "所以", "因为", "如果", "就是")
+CONNECTOR_RESTART_INTRUSION_WORDS = ("哪", "那", "啊", "呀", "呃", "嗯", "诶", "哎", "唉", "额")
+MAX_CONNECTOR_RESTART_INTRUSION_DURATION_US = 450_000
+MIN_CONNECTOR_RESTART_REMAINING_CHARS = 6
+MIN_REPEATED_OBJECT_HEAD_GAP_US = 120_000
+MIN_REPEATED_OBJECT_REMAINING_CHARS = 6
 
 
 @dataclass(frozen=True)
@@ -90,6 +112,7 @@ def repair_final_visible_caption_issues(
     current_captions = _renumber_captions(list(captions))
     initial_gate = build_final_caption_visible_repeat_gate(current_captions)
     initial_timeline_gate = build_final_caption_visible_repeat_gate(_timeline_caption_units(current_timeline, source_graph))
+    initial_semantic_junk_report = build_pre_visible_semantic_junk_candidate_report(current_captions, source_graph)
     actions: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     max_pass_limit = max(1, int(max_passes))
@@ -100,6 +123,152 @@ def repair_final_visible_caption_issues(
 
     for pass_index in range(max_pass_limit):
         passes_executed = pass_index + 1
+        leading_filler_step = _repair_leading_filler_gap(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if leading_filler_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(leading_filler_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(leading_filler_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": leading_filler_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        connector_intrusion_step = _repair_connector_single_word_intrusion(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if connector_intrusion_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(connector_intrusion_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(connector_intrusion_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": connector_intrusion_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        connector_restart_step = _repair_connector_filler_restart(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if connector_restart_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(connector_restart_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(connector_restart_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": connector_restart_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        repeated_object_head_step = _repair_repeated_object_head_tail(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if repeated_object_head_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(repeated_object_head_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(repeated_object_head_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": repeated_object_head_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        pre_semantic_junk_step = _repair_pre_visible_semantic_junk_candidate(
+            final_timeline=current_timeline,
+            captions=current_captions,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if pre_semantic_junk_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(pre_semantic_junk_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(pre_semantic_junk_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": pre_semantic_junk_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
         source_prefix_step = _repair_source_boundary_prefix_gap(
             final_timeline=current_timeline,
             source_graph=source_graph,
@@ -277,11 +446,29 @@ def repair_final_visible_caption_issues(
 
     current_captions, final_caption_only_actions = _finalize_caption_only_dangling_merges(
         current_captions,
+        source_graph=source_graph,
         pass_index_start=len(actions) + 1,
     )
     actions.extend(final_caption_only_actions)
 
     final_gate = build_final_caption_visible_repeat_gate(current_captions)
+    final_semantic_junk_report = build_pre_visible_semantic_junk_candidate_report(current_captions, source_graph)
+    semantic_junk_actions = [
+        action
+        for action in actions
+        if str(action.get("issue_type") or "") == "pre_visible_semantic_junk_candidate"
+    ]
+    final_semantic_junk_report = {
+        **final_semantic_junk_report,
+        "pre_visible_semantic_junk_audit_only": False,
+        "pre_visible_semantic_junk_candidate_detector_audit_only": True,
+        "pre_visible_semantic_junk_timeline_mutation_allowed": True,
+        "pre_visible_semantic_junk_deterministic_apply_enabled": True,
+        "pre_visible_semantic_junk_deterministic_apply_policy": "local_high_confidence_drop_fragment_only",
+        "pre_visible_semantic_junk_deterministic_apply_min_confidence": PRE_VISIBLE_SEMANTIC_JUNK_MIN_HIGH_CONFIDENCE,
+        "pre_visible_semantic_junk_repair_action_count": len(semantic_junk_actions),
+        "pre_visible_semantic_junk_repair_actions": semantic_junk_actions,
+    }
     final_effective_timeline_captions, final_materializations = _effective_timeline_caption_units(
         _timeline_caption_units(current_timeline, source_graph),
         current_captions,
@@ -326,6 +513,17 @@ def repair_final_visible_caption_issues(
         "final_visible_repair_initial_timeline_counts": _repair_counts(initial_timeline_gate),
         "final_visible_repair_final_counts": final_counts,
         "final_visible_repair_final_timeline_counts": final_timeline_counts,
+        "pre_visible_semantic_junk_initial_report": initial_semantic_junk_report,
+        "pre_visible_semantic_junk_report": final_semantic_junk_report,
+        "pre_visible_semantic_junk_initial_candidate_count": int(initial_semantic_junk_report.get("pre_visible_semantic_junk_candidate_count") or 0),
+        "pre_visible_semantic_junk_final_candidate_count": int(final_semantic_junk_report.get("pre_visible_semantic_junk_candidate_count") or 0),
+        "pre_visible_semantic_junk_repair_action_count": len(semantic_junk_actions),
+        "pre_visible_semantic_junk_repair_actions": semantic_junk_actions,
+        "pre_visible_semantic_junk_audit_only": False,
+        "pre_visible_semantic_junk_candidate_detector_audit_only": True,
+        "pre_visible_semantic_junk_timeline_mutation_allowed": True,
+        "pre_visible_semantic_junk_deterministic_apply_enabled": True,
+        "pre_visible_semantic_junk_deterministic_apply_policy": "local_high_confidence_drop_fragment_only",
         "final_visible_effective_caption_count": len(final_effective_timeline_captions),
         "caption_only_materialized_merge_count": len(final_materializations),
         "caption_only_materialized_merges": final_materializations,
@@ -418,6 +616,15 @@ def _repair_dangling_prefix_suffix(
         no_step: _RepairStep | None = None
         return no_step
     current = ordered[index]
+    tail_suffix_step = _repair_dangling_pronoun_modal_suffix(
+        final_timeline,
+        current,
+        source_graph,
+        candidate,
+        pass_index,
+    )
+    if tail_suffix_step is not None:
+        return tail_suffix_step
     same_segment_de_duplicate = _repair_same_segment_de_duplicate_prefix(
         final_timeline,
         current,
@@ -433,6 +640,17 @@ def _repair_dangling_prefix_suffix(
     previous = ordered[index - 1]
     combined_text = f"{previous.text}{current.text}"
     if len(normalize_text(combined_text)) > HARD_MAX_CHARS:
+        prefix_transfer_step = _transfer_leading_function_prefix_to_previous_caption(
+            final_timeline=final_timeline,
+            captions=ordered,
+            previous_index=index - 1,
+            current_index=index,
+            source_graph=source_graph,
+            candidate=candidate,
+            pass_index=pass_index,
+        )
+        if prefix_transfer_step is not None:
+            return prefix_transfer_step
         no_step: _RepairStep | None = None
         return no_step
 
@@ -498,6 +716,7 @@ def _repair_dangling_prefix_suffix(
 def _finalize_caption_only_dangling_merges(
     captions: list[CaptionRenderUnit],
     *,
+    source_graph: CanonicalSourceGraph,
     pass_index_start: int,
 ) -> tuple[list[CaptionRenderUnit], list[dict[str, Any]]]:
     current = _renumber_captions(list(captions))
@@ -509,6 +728,18 @@ def _finalize_caption_only_dangling_merges(
         step: _RepairStep | None = None
         for candidate in list(gate.get("dangling_prefix_suffix_candidates") or []):
             step = _repair_dangling_prefix_suffix_caption_only(current, candidate, pass_index)
+            if step is None:
+                index = _caption_index(_ordered_captions(current), str(candidate.get("caption_id") or ""))
+                if index is not None and index > 0:
+                    step = _transfer_leading_function_prefix_to_previous_caption(
+                        final_timeline=[],
+                        captions=_ordered_captions(current),
+                        previous_index=index - 1,
+                        current_index=index,
+                        source_graph=source_graph,
+                        candidate=candidate,
+                        pass_index=pass_index,
+                    )
             if step is not None:
                 break
         if step is None:
@@ -571,6 +802,462 @@ def _repair_dangling_prefix_suffix_caption_only(
             merged_caption_target_end_us=int(merged_caption.target_end_us),
         ),
     )
+
+
+def _transfer_leading_function_prefix_to_previous_caption(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    captions: list[CaptionRenderUnit],
+    previous_index: int,
+    current_index: int,
+    source_graph: CanonicalSourceGraph,
+    candidate: dict[str, Any],
+    pass_index: int,
+) -> _RepairStep | None:
+    if normalize_text(str(candidate.get("reason") or "")) != "dangling_de_prefix":
+        no_step: _RepairStep | None = None
+        return no_step
+    if previous_index < 0 or current_index <= previous_index or current_index >= len(captions):
+        no_step: _RepairStep | None = None
+        return no_step
+    previous = captions[previous_index]
+    current = captions[current_index]
+    if str(previous.containing_video_segment_id or "") != str(current.containing_video_segment_id or ""):
+        no_step: _RepairStep | None = None
+        return no_step
+    if int(current.target_start_us) < int(previous.target_end_us):
+        no_step: _RepairStep | None = None
+        return no_step
+    if not current.word_ids or len(current.word_ids) < 2:
+        no_step: _RepairStep | None = None
+        return no_step
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    leading_word = words_by_id.get(current.word_ids[0])
+    if leading_word is None:
+        no_step: _RepairStep | None = None
+        return no_step
+    leading_text = str(getattr(leading_word, "text", "") or "")
+    if normalize_text(leading_text) != "的":
+        no_step: _RepairStep | None = None
+        return no_step
+    remaining_word_ids = list(current.word_ids[1:])
+    remaining_text = _text_from_word_ids(remaining_word_ids, source_graph)
+    if not normalize_text(remaining_text):
+        no_step: _RepairStep | None = None
+        return no_step
+    previous_text = _join_visible_boundary_text(str(previous.text or ""), leading_text)
+    if len(normalize_text(previous_text)) > HARD_MAX_CHARS:
+        no_step: _RepairStep | None = None
+        return no_step
+    if not bool(build_final_caption_visible_repeat_gate([replace(current, text=remaining_text, word_ids=remaining_word_ids)]).get("gate_passed")):
+        no_step: _RepairStep | None = None
+        return no_step
+    boundary_us = _target_boundary_after_leading_word(current, source_graph)
+    if boundary_us is None:
+        no_step: _RepairStep | None = None
+        return no_step
+    if boundary_us - int(previous.target_start_us) < MIN_REBALANCED_CAPTION_DURATION_US:
+        no_step: _RepairStep | None = None
+        return no_step
+    if int(current.target_end_us) - boundary_us < MIN_REBALANCED_CAPTION_DURATION_US:
+        no_step: _RepairStep | None = None
+        return no_step
+    leading_uid = str(getattr(leading_word, "subtitle_uid", "") or "")
+    remaining_uids = [
+        str(getattr(words_by_id[word_id], "subtitle_uid", "") or "")
+        for word_id in remaining_word_ids
+        if word_id in words_by_id and str(getattr(words_by_id[word_id], "subtitle_uid", "") or "")
+    ]
+    previous_repaired = replace(
+        previous,
+        word_ids=[*previous.word_ids, current.word_ids[0]],
+        text=previous_text,
+        target_end_us=boundary_us,
+        source_subtitle_uids=_unique([*previous.source_subtitle_uids, leading_uid]),
+        spoken_source_end_us=int(getattr(leading_word, "source_end_us", 0) or 0),
+    )
+    first_remaining = words_by_id.get(remaining_word_ids[0])
+    current_repaired = replace(
+        current,
+        word_ids=remaining_word_ids,
+        text=remaining_text,
+        target_start_us=boundary_us,
+        source_subtitle_uids=_unique(remaining_uids or list(current.source_subtitle_uids)),
+        spoken_source_start_us=int(getattr(first_remaining, "source_start_us", 0) or 0) if first_remaining is not None else current.spoken_source_start_us,
+    )
+    repaired = list(captions)
+    repaired[previous_index] = previous_repaired
+    repaired[current_index] = current_repaired
+    return _RepairStep(
+        final_timeline=final_timeline,
+        captions=repaired,
+        timeline_changed=False,
+        action=_action(
+            "dangling_prefix_suffix",
+            "transfer_leading_function_prefix_to_previous_caption",
+            pass_index,
+            candidate,
+            affected_caption_ids=[previous.caption_id, current.caption_id],
+            transferred_word_ids=[current.word_ids[0]],
+            transferred_text=leading_text,
+            previous_caption_text=previous_repaired.text,
+            current_caption_text=current_repaired.text,
+            boundary_target_us=boundary_us,
+        ),
+    )
+
+
+def _target_boundary_after_leading_word(
+    caption: CaptionRenderUnit,
+    source_graph: CanonicalSourceGraph,
+) -> int | None:
+    if not caption.word_ids:
+        no_boundary: int | None = None
+        return no_boundary
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    words = [words_by_id[word_id] for word_id in caption.word_ids if word_id in words_by_id]
+    if not words:
+        no_boundary: int | None = None
+        return no_boundary
+    duration_us = max(0, int(caption.target_end_us) - int(caption.target_start_us))
+    if duration_us <= MIN_REBALANCED_CAPTION_DURATION_US:
+        no_boundary: int | None = None
+        return no_boundary
+    source_span_us = max(1, int(getattr(words[-1], "source_end_us", 0) or 0) - int(getattr(words[0], "source_start_us", 0) or 0))
+    leading_source_us = max(
+        1,
+        int(getattr(words[0], "source_end_us", 0) or 0) - int(getattr(words[0], "source_start_us", 0) or 0),
+    )
+    scaled_us = round(duration_us * leading_source_us / source_span_us)
+    transfer_us = max(MIN_TRANSFERRED_PREFIX_TARGET_US, min(MAX_TRANSFERRED_PREFIX_TARGET_US, int(scaled_us)))
+    max_transfer_us = duration_us - MIN_REBALANCED_CAPTION_DURATION_US
+    if max_transfer_us < MIN_TRANSFERRED_PREFIX_TARGET_US:
+        no_boundary: int | None = None
+        return no_boundary
+    transfer_us = min(transfer_us, max_transfer_us)
+    return int(caption.target_start_us) + transfer_us
+
+
+def _repair_leading_filler_gap(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    for segment in _ordered_segments(final_timeline):
+        if len(segment.word_ids) < 2:
+            continue
+        first = words_by_id.get(segment.word_ids[0])
+        second = words_by_id.get(segment.word_ids[1])
+        if first is None or second is None:
+            continue
+        first_text = normalize_text(str(getattr(first, "text", "") or ""))
+        if first_text not in LEADING_FILLER_WORDS:
+            continue
+        first_duration_us = int(getattr(first, "source_end_us", 0) or 0) - int(getattr(first, "source_start_us", 0) or 0)
+        if first_duration_us <= 0 or first_duration_us > MAX_LEADING_FILLER_DURATION_US:
+            continue
+        source_gap_us = int(getattr(second, "source_start_us", 0) or 0) - int(getattr(first, "source_end_us", 0) or 0)
+        if source_gap_us < MIN_LEADING_FILLER_GAP_US:
+            continue
+        remaining_word_ids = list(segment.word_ids[1:])
+        remaining_text = normalize_text(_text_from_word_ids(remaining_word_ids, source_graph))
+        if len(remaining_text) < MIN_LEADING_FILLER_REMAINING_CHARS:
+            continue
+        repaired = _trim_word_ids_from_timeline(final_timeline, source_graph, [segment.word_ids[0]])
+        if repaired is None:
+            continue
+        return _RepairStep(
+            final_timeline=repaired,
+            captions=[],
+            timeline_changed=True,
+            action=_action(
+                "leading_filler_gap",
+                "trim_leading_filler_gap",
+                pass_index,
+                {
+                    "caption_id": "",
+                    "related_caption_id": "",
+                    "reason": "isolated leading filler before a long source gap",
+                    "overlap_text": first_text,
+                },
+                affected_segment_id=segment.segment_id,
+                dropped_word_ids=[segment.word_ids[0]],
+                filler_text=str(getattr(first, "text", "") or ""),
+                source_gap_us=source_gap_us,
+            ),
+        )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _repair_connector_single_word_intrusion(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    for segment in _ordered_segments(final_timeline):
+        if len(segment.word_ids) < 4:
+            continue
+        for index in range(1, len(segment.word_ids) - 1):
+            previous = words_by_id.get(segment.word_ids[index - 1])
+            current = words_by_id.get(segment.word_ids[index])
+            next_word = words_by_id.get(segment.word_ids[index + 1])
+            if previous is None or current is None or next_word is None:
+                continue
+            current_text = normalize_text(str(getattr(current, "text", "") or ""))
+            next_text = normalize_text(str(getattr(next_word, "text", "") or ""))
+            if len(current_text) != 1 or next_text not in CONNECTOR_INTRUSION_NEXT_WORDS:
+                continue
+            current_duration_us = int(getattr(current, "source_end_us", 0) or 0) - int(getattr(current, "source_start_us", 0) or 0)
+            if current_duration_us <= 0 or current_duration_us > MAX_CONNECTOR_INTRUSION_WORD_DURATION_US:
+                continue
+            left_gap_us = int(getattr(current, "source_start_us", 0) or 0) - int(getattr(previous, "source_end_us", 0) or 0)
+            right_gap_us = int(getattr(next_word, "source_start_us", 0) or 0) - int(getattr(current, "source_end_us", 0) or 0)
+            if left_gap_us < MIN_CONNECTOR_INTRUSION_SIDE_GAP_US or right_gap_us < MIN_CONNECTOR_INTRUSION_SIDE_GAP_US:
+                continue
+            remaining = [word_id for pos, word_id in enumerate(segment.word_ids) if pos != index]
+            remaining_text = normalize_text(_text_from_word_ids(remaining, source_graph))
+            if len(remaining_text) < MIN_CONNECTOR_INTRUSION_REMAINING_CHARS:
+                continue
+            repaired = _drop_contiguous_word_ids_from_timeline(
+                final_timeline,
+                source_graph,
+                [segment.word_ids[index]],
+                "connector_single_word_intrusion",
+            )
+            if repaired is None:
+                continue
+            return _RepairStep(
+                final_timeline=repaired,
+                captions=[],
+                timeline_changed=True,
+                action=_action(
+                    "connector_single_word_intrusion",
+                    "trim_single_word_intrusion_before_connector",
+                    pass_index,
+                    {
+                        "caption_id": "",
+                        "related_caption_id": "",
+                        "reason": "single isolated word before a discourse connector is likely ASR intrusion",
+                        "overlap_text": current_text + next_text,
+                    },
+                    affected_segment_id=segment.segment_id,
+                    dropped_word_ids=[segment.word_ids[index]],
+                    dropped_text=str(getattr(current, "text", "") or ""),
+                    connector_text=str(getattr(next_word, "text", "") or ""),
+                    left_gap_us=left_gap_us,
+                    right_gap_us=right_gap_us,
+                ),
+            )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _repair_connector_filler_restart(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    for segment in _ordered_segments(final_timeline):
+        if len(segment.word_ids) < 4:
+            continue
+        for index in range(0, len(segment.word_ids) - 2):
+            first = words_by_id.get(segment.word_ids[index])
+            filler = words_by_id.get(segment.word_ids[index + 1])
+            restart = words_by_id.get(segment.word_ids[index + 2])
+            if first is None or filler is None or restart is None:
+                continue
+            first_text = normalize_text(str(getattr(first, "text", "") or ""))
+            filler_text = normalize_text(str(getattr(filler, "text", "") or ""))
+            restart_text = normalize_text(str(getattr(restart, "text", "") or ""))
+            if first_text not in CONNECTOR_RESTART_WORDS or restart_text != first_text:
+                continue
+            if filler_text not in CONNECTOR_RESTART_INTRUSION_WORDS:
+                continue
+            filler_duration_us = int(getattr(filler, "source_end_us", 0) or 0) - int(getattr(filler, "source_start_us", 0) or 0)
+            if filler_duration_us <= 0 or filler_duration_us > MAX_CONNECTOR_RESTART_INTRUSION_DURATION_US:
+                continue
+            remaining_word_ids = [word_id for pos, word_id in enumerate(segment.word_ids) if pos not in {index, index + 1}]
+            remaining_text = normalize_text(_text_from_word_ids(remaining_word_ids, source_graph))
+            if len(remaining_text) < MIN_CONNECTOR_RESTART_REMAINING_CHARS:
+                continue
+            drop_word_ids = [segment.word_ids[index], segment.word_ids[index + 1]]
+            repaired = _drop_contiguous_word_ids_from_timeline(
+                final_timeline,
+                source_graph,
+                drop_word_ids,
+                "connector_filler_restart",
+            )
+            if repaired is None:
+                continue
+            return _RepairStep(
+                final_timeline=repaired,
+                captions=[],
+                timeline_changed=True,
+                action=_action(
+                    "connector_filler_restart",
+                    "trim_connector_filler_before_restart",
+                    pass_index,
+                    {
+                        "caption_id": "",
+                        "related_caption_id": "",
+                        "reason": "discourse connector is restarted after a short filler intrusion",
+                        "overlap_text": f"{first_text}{filler_text}{restart_text}",
+                    },
+                    affected_segment_id=segment.segment_id,
+                    dropped_word_ids=drop_word_ids,
+                    dropped_text=f"{first_text}{filler_text}",
+                    restart_word_id=segment.word_ids[index + 2],
+                    restart_text=restart_text,
+                    filler_duration_us=filler_duration_us,
+                ),
+            )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _repair_repeated_object_head_tail(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    for segment in _ordered_segments(final_timeline):
+        if len(segment.word_ids) < 5:
+            continue
+        first = words_by_id.get(segment.word_ids[0])
+        second = words_by_id.get(segment.word_ids[1])
+        last = words_by_id.get(segment.word_ids[-1])
+        if first is None or second is None or last is None:
+            continue
+        first_text = normalize_text(str(getattr(first, "text", "") or ""))
+        last_text = normalize_text(str(getattr(last, "text", "") or ""))
+        if not (2 <= len(first_text) <= 4) or len(last_text) != 1:
+            continue
+        if not first_text.startswith(last_text):
+            continue
+        text = normalize_text(str(segment.text or ""))
+        if not text.endswith(last_text) or f"的{last_text}" not in text:
+            continue
+        source_gap_us = int(getattr(second, "source_start_us", 0) or 0) - int(getattr(first, "source_end_us", 0) or 0)
+        if source_gap_us < MIN_REPEATED_OBJECT_HEAD_GAP_US:
+            continue
+        first_subtitle_uid = str(getattr(first, "subtitle_uid", "") or "")
+        second_subtitle_uid = str(getattr(second, "subtitle_uid", "") or "")
+        if first_subtitle_uid and second_subtitle_uid and first_subtitle_uid == second_subtitle_uid:
+            continue
+        remaining_word_ids = list(segment.word_ids[1:])
+        remaining_text = normalize_text(_text_from_word_ids(remaining_word_ids, source_graph))
+        if len(remaining_text) < MIN_REPEATED_OBJECT_REMAINING_CHARS:
+            continue
+        repaired = _trim_word_ids_from_timeline(final_timeline, source_graph, [segment.word_ids[0]])
+        if repaired is None:
+            continue
+        return _RepairStep(
+            final_timeline=repaired,
+            captions=[],
+            timeline_changed=True,
+            action=_action(
+                "leading_object_head_repeated_as_tail",
+                "trim_repeated_object_head",
+                pass_index,
+                {
+                    "caption_id": "",
+                    "related_caption_id": "",
+                    "reason": "leading object label repeats as the final syntactic head",
+                    "overlap_text": last_text,
+                },
+                affected_segment_id=segment.segment_id,
+                dropped_word_ids=[segment.word_ids[0]],
+                dropped_text=str(getattr(first, "text", "") or ""),
+                tail_text=str(getattr(last, "text", "") or ""),
+                source_gap_us=source_gap_us,
+            ),
+        )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _repair_pre_visible_semantic_junk_candidate(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    captions: list[CaptionRenderUnit],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+    for candidate in list(report.get("pre_visible_semantic_junk_candidates") or []):
+        if not _is_deterministic_pre_visible_semantic_junk_drop(candidate):
+            continue
+        caption_ids = [str(value) for value in list(candidate.get("target_caption_ids") or []) if str(value)]
+        if len(caption_ids) != 1:
+            continue
+        caption = _caption_by_id(captions, caption_ids[0])
+        if caption is None:
+            continue
+        target_word_ids = [str(value) for value in list(candidate.get("target_word_ids") or []) if str(value)]
+        if target_word_ids and list(caption.word_ids) != target_word_ids:
+            continue
+        dropped = _drop_or_trim_caption_words(final_timeline, captions, source_graph, caption)
+        if dropped is None:
+            continue
+        repaired_timeline, dropped_segment_ids, trimmed_segment_ids = dropped
+        decision = (
+            "drop_high_confidence_semantic_junk_segment"
+            if dropped_segment_ids
+            else "trim_high_confidence_semantic_junk_words"
+        )
+        return _RepairStep(
+            final_timeline=repaired_timeline,
+            captions=captions,
+            timeline_changed=True,
+            action=_action(
+                "pre_visible_semantic_junk_candidate",
+                decision,
+                pass_index,
+                {
+                    "caption_id": caption.caption_id,
+                    "related_caption_id": str(candidate.get("candidate_id") or ""),
+                    "reason": str(candidate.get("type") or ""),
+                    "overlap_text": str(candidate.get("visible_text") or ""),
+                },
+                affected_caption_ids=[caption.caption_id],
+                candidate_id=str(candidate.get("candidate_id") or ""),
+                candidate_type=str(candidate.get("type") or ""),
+                proposed_action=str(candidate.get("proposed_action") or ""),
+                local_confidence=float(candidate.get("local_confidence") or 0.0),
+                provider_required=bool(candidate.get("provider_required")),
+                safety_tags=list(candidate.get("safety_tags") or []),
+                evidence=dict(candidate.get("evidence") or {}),
+                dropped_segment_ids=dropped_segment_ids,
+                trimmed_segment_ids=trimmed_segment_ids,
+                dropped_word_ids=list(caption.word_ids),
+                dropped_text=str(caption.text or ""),
+                native_words_text=str(candidate.get("native_words_text") or ""),
+            ),
+        )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _is_deterministic_pre_visible_semantic_junk_drop(candidate: dict[str, Any]) -> bool:
+    if str(candidate.get("proposed_action") or "") != "drop_fragment":
+        return False
+    if bool(candidate.get("provider_required")):
+        return False
+    if float(candidate.get("local_confidence") or 0.0) < PRE_VISIBLE_SEMANTIC_JUNK_MIN_HIGH_CONFIDENCE:
+        return False
+    if str(candidate.get("type") or "") not in {"aborted_restart", "prefix_restart"}:
+        return False
+    safety_tags = {str(value) for value in list(candidate.get("safety_tags") or [])}
+    return "drop_audio_and_caption_together" in safety_tags
 
 
 def _repair_isolated_semantic_junk_caption(
@@ -868,6 +1555,47 @@ def _drop_repeated_caption_span(
             affected_caption_ids=[caption.caption_id],
             dropped_segment_ids=dropped_segment_ids,
             trimmed_segment_ids=trimmed_segment_ids,
+        ),
+    )
+
+
+def _repair_dangling_pronoun_modal_suffix(
+    final_timeline: list[FinalTimelineSegment],
+    caption: CaptionRenderUnit,
+    source_graph: CanonicalSourceGraph,
+    candidate: dict[str, Any],
+    pass_index: int,
+) -> _RepairStep | None:
+    if str(candidate.get("reason") or "") != "dangling_pronoun_modal_suffix":
+        no_step: _RepairStep | None = None
+        return no_step
+    suffix = _dangling_pronoun_modal_suffix(normalize_text(caption.text))
+    if not suffix:
+        no_step: _RepairStep | None = None
+        return no_step
+    drop_word_ids = _trailing_word_ids_for_text(caption.word_ids, source_graph, suffix)
+    if not drop_word_ids:
+        no_step: _RepairStep | None = None
+        return no_step
+    if len(drop_word_ids) >= len(caption.word_ids):
+        no_step: _RepairStep | None = None
+        return no_step
+    repaired_timeline = _trim_word_ids_from_timeline(final_timeline, source_graph, drop_word_ids)
+    if repaired_timeline is None:
+        no_step: _RepairStep | None = None
+        return no_step
+    return _RepairStep(
+        final_timeline=repaired_timeline,
+        captions=[],
+        timeline_changed=True,
+        action=_action(
+            "dangling_prefix_suffix",
+            "trim_dangling_suffix_tail",
+            pass_index,
+            candidate,
+            affected_caption_ids=[caption.caption_id],
+            dropped_word_ids=drop_word_ids,
+            drop_text=suffix,
         ),
     )
 
@@ -1692,10 +2420,13 @@ def _merge_adjacent_caption_segments(
         return no_merge
     merged_word_ids = [*left.word_ids, *right.word_ids]
     text = _text_from_word_ids(merged_word_ids, source_graph) or f"{left.text}{right.text}"
+    source_start_us = int(left.source_start_us)
+    source_end_us = int(right.source_end_us)
+    target_duration_us = _target_duration_preserving_effective_speed(left, source_start_us, source_end_us)
     merged = replace(
         left,
-        source_end_us=int(right.source_end_us),
-        target_end_us=int(right.target_end_us),
+        source_end_us=source_end_us,
+        target_end_us=int(left.target_start_us) + target_duration_us,
         word_ids=merged_word_ids,
         text=text,
         decision_ids=_unique([*left.decision_ids, *right.decision_ids]),
@@ -1907,6 +2638,34 @@ def _leading_word_ids_for_text(
         if joined == target:
             return selected
         if not target.startswith(joined):
+            empty: list[str] = []
+            return empty
+    empty: list[str] = []
+    return empty
+
+
+def _trailing_word_ids_for_text(
+    word_ids: list[str],
+    source_graph: CanonicalSourceGraph,
+    text: str,
+) -> list[str]:
+    target = normalize_text(text)
+    if not target:
+        empty: list[str] = []
+        return empty
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    selected: list[str] = []
+    joined = ""
+    for word_id in reversed(word_ids):
+        word = words_by_id.get(word_id)
+        if word is None:
+            empty: list[str] = []
+            return empty
+        selected.append(word_id)
+        joined = normalize_text(word.text) + joined
+        if joined == target:
+            return list(reversed(selected))
+        if not target.endswith(joined):
             empty: list[str] = []
             return empty
     empty: list[str] = []

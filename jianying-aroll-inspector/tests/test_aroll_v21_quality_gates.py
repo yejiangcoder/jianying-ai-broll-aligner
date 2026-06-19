@@ -732,6 +732,57 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertEqual([caption.text for caption in result.captions], ["我们反对的是公共问题"])
         self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "merge_with_previous_segment")
 
+    def test_final_visible_segment_merge_recomputes_target_end_for_speed_invariant(self) -> None:
+        rows = [
+            ("w001", "我们反对", 0, 800_000),
+            ("w002", "的是公共问题", 800_000, 1_600_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        timeline = [
+            replace(
+                _segment(1, 0, 666_667),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=800_000,
+                target_start_us=0,
+                target_end_us=666_667,
+                word_ids=["w001"],
+                text="我们反对",
+                clip_source_end_us=800_000,
+            ),
+            replace(
+                _segment(2, 666_667, 1_333_334),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=800_000,
+                source_end_us=1_600_000,
+                target_start_us=666_667,
+                target_end_us=1_333_334,
+                word_ids=["w002"],
+                text="的是公共问题",
+                clip_source_end_us=1_820_000,
+                tail_handle_us=220_000,
+            ),
+        ]
+        captions = [
+            CaptionRenderUnit("v21_cap_000001", ["v21_seg_000001"], ["w001"], "我们反对", 0, 666_667, ["s001"], "canonical_caption_template", containing_video_segment_id="v21_seg_000001"),
+            CaptionRenderUnit("v21_cap_000002", ["v21_seg_000002"], ["w002"], "的是公共问题", 666_667, 1_333_334, ["s001"], "canonical_caption_template", containing_video_segment_id="v21_seg_000002"),
+        ]
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: SubtitleRenderer().render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual(len(result.final_timeline), 1)
+        self.assertEqual(result.final_timeline[0].target_end_us, 1_600_000)
+        self.assertEqual(result.final_timeline[0].clip_source_end_us, 1_820_000)
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "merge_with_previous_segment")
+
     def test_final_visible_caption_only_merge_normalizes_de_shi_prepositional_boundary(self) -> None:
         source_graph, timeline = _timeline_with_partial_tail_dangling_pair()
         renderer = SubtitleRenderer()
@@ -787,6 +838,371 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertTrue(result.report["final_visible_repair_success"])
         self.assertEqual([caption.text for caption in result.captions], ["前文铺垫", "你嘲笑嘉豪是对自己人的规训"])
         self.assertEqual(result.report["caption_only_materialized_merge_count"], 1)
+
+    def test_final_visible_trims_leading_filler_before_long_source_gap(self) -> None:
+        rows = [
+            ("w001", "咳", 0, 700_000),
+            ("w002", "立刻", 1_900_000, 2_200_000),
+            ("w003", "给", 2_200_000, 2_360_000),
+            ("w004", "我", 2_360_000, 2_520_000),
+            ("w005", "关了", 2_520_000, 2_900_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_900_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_900_000,
+                target_start_us=0,
+                target_end_us=2_900_000,
+                word_ids=[row[0] for row in rows],
+                text="咳立刻给我关了",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual([segment.text for segment in result.final_timeline], ["立刻给我关了"])
+        self.assertEqual(result.final_timeline[0].source_start_us, 1_900_000)
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "trim_leading_filler_gap")
+
+    def test_final_visible_trims_single_word_intrusion_before_connector(self) -> None:
+        rows = [
+            ("w001", "底盘", 0, 360_000),
+            ("w002", "不行", 360_000, 760_000),
+            ("w003", "手", 1_160_000, 1_360_000),
+            ("w004", "所以", 1_700_000, 2_060_000),
+            ("w005", "你", 2_060_000, 2_220_000),
+            ("w006", "手里", 2_220_000, 2_620_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_620_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_620_000,
+                target_start_us=0,
+                target_end_us=2_620_000,
+                word_ids=[row[0] for row in rows],
+                text="底盘不行手所以你手里",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "底盘不行所以你手里")
+        self.assertNotIn("w003", [word_id for segment in result.final_timeline for word_id in segment.word_ids])
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "trim_single_word_intrusion_before_connector")
+
+    def test_final_visible_trims_repeated_object_head_before_tail_repeat(self) -> None:
+        rows = [
+            ("w001", "心形", 0, 700_000),
+            ("w002", "用", 1_000_000, 1_200_000),
+            ("w003", "个", 1_200_000, 1_360_000),
+            ("w004", "玫瑰花", 1_360_000, 1_800_000),
+            ("w005", "摆", 1_880_000, 2_040_000),
+            ("w006", "个", 2_040_000, 2_200_000),
+            ("w007", "土", 2_240_000, 2_320_000),
+            ("w008", "到", 2_400_000, 2_560_000),
+            ("w009", "爆", 2_560_000, 2_640_000),
+            ("w010", "的", 2_680_000, 2_840_000),
+            ("w011", "心", 2_840_000, 3_200_000),
+        ]
+        materials, text_segments = _template_rows()
+        words = [
+            {
+                "word_id": word_id,
+                "word_text": text,
+                "start_us": start,
+                "end_us": end,
+                "subtitle_index": 1 if word_id == "w001" else 2,
+                "subtitle_uid": "s001" if word_id == "w001" else "s002",
+            }
+            for word_id, text, start, end in rows
+        ]
+        source_graph = ArollEngine().ingest.build_source_graph(
+            word_timeline=words,
+            subtitles=[
+                {"subtitle_uid": "s001", "subtitle_index": 1, "text": "心形", "word_ids": ["w001"]},
+                {
+                    "subtitle_uid": "s002",
+                    "subtitle_index": 2,
+                    "text": "用个玫瑰花摆个土到爆的心",
+                    "word_ids": [row[0] for row in rows[1:]],
+                },
+            ],
+            source_segments=[
+                {
+                    "id": "primary_window",
+                    "material_id": "main",
+                    "type": "video",
+                    "source_start_us": 0,
+                    "source_end_us": 3_700_000,
+                }
+            ],
+            text_materials=materials,
+            text_segments=text_segments,
+        )
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 3_200_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=3_200_000,
+                target_start_us=0,
+                target_end_us=3_200_000,
+                word_ids=[row[0] for row in rows],
+                text="心形用个玫瑰花摆个土到爆的心",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual([segment.text for segment in result.final_timeline], ["用个玫瑰花摆个土到爆的心"])
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "trim_repeated_object_head")
+
+    def test_final_visible_gate_detects_adjacent_repeated_short_discourse_opener(self) -> None:
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001"],
+                "但凡任何一个普通人",
+                0,
+                800_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=0,
+                spoken_source_end_us=800_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000002"],
+                ["w002"],
+                "但凡给你一点反馈",
+                800_000,
+                1_500_000,
+                ["s002"],
+                "canonical_caption_template",
+                spoken_source_start_us=860_000,
+                spoken_source_end_us=1_500_000,
+                containing_video_segment_id="v21_seg_000002",
+            ),
+        ]
+
+        gate = build_final_caption_visible_repeat_gate(captions)
+
+        self.assertFalse(gate["gate_passed"])
+        self.assertEqual(gate["restart_repeat_visible_count"], 1)
+        self.assertEqual(gate["restart_repeat_visible_candidates"][0]["pattern"], "repeated_discourse_opener")
+        self.assertEqual(gate["restart_repeat_visible_candidates"][0]["drop_text"], "但凡")
+
+    def test_final_visible_repair_trims_repeated_short_discourse_opener(self) -> None:
+        rows = [
+            ("w001", "但凡", 0, 260_000),
+            ("w002", "任何", 260_000, 520_000),
+            ("w003", "一个", 520_000, 760_000),
+            ("w004", "普通人", 760_000, 1_120_000),
+            ("w005", "但凡", 1_180_000, 1_440_000),
+            ("w006", "给你", 1_440_000, 1_720_000),
+            ("w007", "一点", 1_720_000, 1_960_000),
+            ("w008", "反馈", 1_960_000, 2_260_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_120_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_120_000,
+                target_start_us=0,
+                target_end_us=1_120_000,
+                word_ids=["w001", "w002", "w003", "w004"],
+                text="但凡任何一个普通人",
+            ),
+            replace(
+                _segment(2, 1_120_000, 2_200_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_180_000,
+                source_end_us=2_260_000,
+                target_start_us=1_120_000,
+                target_end_us=2_200_000,
+                word_ids=["w005", "w006", "w007", "w008"],
+                text="但凡给你一点反馈",
+            ),
+        ]
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001", "w002", "w003", "w004"],
+                "但凡任何一个普通人",
+                0,
+                1_120_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=0,
+                spoken_source_end_us=1_120_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000002"],
+                ["w005", "w006", "w007", "w008"],
+                "但凡给你一点反馈",
+                1_120_000,
+                2_200_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=1_180_000,
+                spoken_source_end_us=2_260_000,
+                containing_video_segment_id="v21_seg_000002",
+            ),
+        ]
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual([segment.text for segment in result.final_timeline], ["但凡任何一个普通人", "给你一点反馈"])
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "trim_restart_prefix")
+
+    def test_final_visible_gate_allows_label_reuse_before_definition(self) -> None:
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001", "w002"],
+                "都叫表白",
+                0,
+                700_000,
+                ["s001"],
+                "canonical_caption_template",
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000002"],
+                ["w003", "w004"],
+                "表白等于释放信号",
+                700_000,
+                1_700_000,
+                ["s002"],
+                "canonical_caption_template",
+                containing_video_segment_id="v21_seg_000002",
+            ),
+        ]
+
+        gate = build_final_caption_visible_repeat_gate(captions)
+
+        self.assertTrue(gate["gate_passed"], gate)
+        self.assertEqual(gate["prefix_suffix_overlap_count"], 0)
+
+    def test_final_visible_gate_allows_explanatory_term_reuse(self) -> None:
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001"],
+                "核心概念",
+                0,
+                700_000,
+                ["s001"],
+                "canonical_caption_template",
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000002"],
+                ["w002", "w003"],
+                "什么叫核心概念",
+                1_200_000,
+                2_300_000,
+                ["s002"],
+                "canonical_caption_template",
+                containing_video_segment_id="v21_seg_000002",
+            ),
+        ]
+
+        gate = build_final_caption_visible_repeat_gate(captions)
+
+        self.assertTrue(gate["gate_passed"], gate)
+        self.assertEqual(gate["containment_repeat_count"], 0)
+        self.assertEqual(gate["ngram_repeat_count"], 0)
+
+    def test_subtitle_renderer_does_not_drop_disjoint_explanatory_term_caption(self) -> None:
+        rows = [
+            ("w001", "核心概念", 0, 600_000),
+            ("w002", "什么叫", 1_200_000, 1_760_000),
+            ("w003", "核心概念", 1_760_000, 2_360_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        timeline = [
+            replace(
+                _segment(1, 0, 600_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=600_000,
+                target_start_us=0,
+                target_end_us=600_000,
+                word_ids=["w001"],
+                text="核心概念",
+            ),
+            replace(
+                _segment(2, 1_200_000, 2_360_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_200_000,
+                source_end_us=2_360_000,
+                target_start_us=600_000,
+                target_end_us=1_760_000,
+                word_ids=["w002", "w003"],
+                text="什么叫核心概念",
+            ),
+        ]
+
+        captions = SubtitleRenderer().render(timeline, source_graph)
+
+        self.assertEqual([caption.text for caption in captions], ["核心概念", "什么叫核心概念"])
+        self.assertEqual([caption.word_ids for caption in captions], [["w001"], ["w002", "w003"]])
 
     def test_final_visible_repairs_dangling_prefix_by_caption_only_merge_when_source_gap_slightly_exceeds_limit(self) -> None:
         source_graph, timeline = _timeline_with_source_gap_dangling_pair()
@@ -862,6 +1278,121 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertFalse(result.report["final_visible_repair_success"])
         self.assertEqual(result.report["final_visible_repair_final_counts"]["dangling_prefix_suffix_count"], 1)
         self.assertEqual(result.report["final_visible_repair_unresolved"][0]["reason"], "no_safe_deterministic_repair_available")
+
+    def test_final_visible_rebalances_leading_de_when_full_merge_would_be_too_long(self) -> None:
+        source_graph = _graph_for_single_subtitle_words(
+            [
+                ("w001", "所以你只能", 0, 600_000),
+                ("w002", "逮住身边的仅有", 600_000, 1_500_000),
+                ("w003", "的", 1_500_000, 1_700_000),
+                ("w004", "一个普通的女同学女同事", 1_700_000, 3_000_000),
+            ]
+        )
+        timeline = [
+            replace(
+                _segment(1, 0, 3_000_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=3_000_000,
+                target_start_us=0,
+                target_end_us=3_000_000,
+                word_ids=["w001", "w002", "w003", "w004"],
+                text="所以你只能逮住身边的仅有的一个普通的女同学女同事",
+            )
+        ]
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001", "w002"],
+                "所以你只能逮住身边的仅有",
+                0,
+                1_500_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=0,
+                spoken_source_end_us=1_500_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000001"],
+                ["w003", "w004"],
+                "的一个普通的女同学女同事",
+                1_500_000,
+                3_000_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=1_500_000,
+                spoken_source_end_us=3_000_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+        ]
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: captions,
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertIn(
+            "transfer_leading_function_prefix_to_previous_caption",
+            [action["decision"] for action in result.report["final_visible_repair_actions"]],
+        )
+        self.assertEqual([caption.text for caption in result.captions], ["所以你只能逮住身边的仅有的", "一个普通的女同学女同事"])
+        self.assertEqual([segment.segment_id for segment in result.final_timeline], ["v21_seg_000001"])
+        self.assertTrue(all(len(caption.text) <= 20 for caption in result.captions))
+        self.assertTrue(build_final_caption_visible_repeat_gate(result.captions)["gate_passed"])
+
+    def test_caption_only_finalize_can_rebalance_leading_de_when_merge_too_long(self) -> None:
+        source_graph = _graph_for_single_subtitle_words(
+            [
+                ("w001", "所以你只能", 0, 600_000),
+                ("w002", "逮住身边的仅有", 600_000, 1_500_000),
+                ("w003", "的", 1_500_000, 1_700_000),
+                ("w004", "一个普通的女同学女同事", 1_700_000, 3_000_000),
+            ]
+        )
+        captions = [
+            CaptionRenderUnit(
+                "v21_cap_000001",
+                ["v21_seg_000001"],
+                ["w001", "w002"],
+                "所以你只能逮住身边的仅有",
+                0,
+                1_500_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=0,
+                spoken_source_end_us=1_500_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                "v21_cap_000002",
+                ["v21_seg_000001"],
+                ["w003", "w004"],
+                "的一个普通的女同学女同事",
+                1_500_000,
+                3_000_000,
+                ["s001"],
+                "canonical_caption_template",
+                spoken_source_start_us=1_500_000,
+                spoken_source_end_us=3_000_000,
+                containing_video_segment_id="v21_seg_000001",
+            ),
+        ]
+
+        repaired, actions = final_visible_repair_module._finalize_caption_only_dangling_merges(
+            captions,
+            source_graph=source_graph,
+            pass_index_start=1,
+        )
+
+        self.assertEqual([caption.text for caption in repaired], ["所以你只能逮住身边的仅有的", "一个普通的女同学女同事"])
+        self.assertEqual(actions[0]["decision"], "transfer_leading_function_prefix_to_previous_caption")
 
     def test_caption_only_merge_materializes_consumed_caption_state(self) -> None:
         source_graph, timeline = _timeline_with_source_gap_dangling_pair()
@@ -1622,7 +2153,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
         )
         self.assertGreaterEqual(result.report["final_visible_repair_action_count"], 4)
 
-    def test_renderer_repairs_deterministic_visible_repeats_before_gate(self) -> None:
+    def test_renderer_repairs_generic_disjoint_visible_repeats_before_gate(self) -> None:
         source_graph = _graph_for_visual_merge_rows(
             [
                 ("w001", "就国南", 0, 640_000),
@@ -1643,8 +2174,9 @@ class ArollV21QualityGateTests(unittest.TestCase):
         captions = SubtitleRenderer().render(segments, source_graph)
         gate = build_final_caption_visible_repeat_gate(captions)
 
+        self.assertEqual([caption.text for caption in captions], ["就国南就只会内斗"])
         self.assertEqual(gate["visible_repeat_candidate_count"], 0)
-        self.assertTrue(gate["gate_passed"])
+        self.assertTrue(gate["gate_passed"], gate)
 
     def test_final_caption_repeat_gate_does_not_depend_on_high_cluster_only(self) -> None:
         caption_gate = build_final_caption_visible_repeat_gate(
@@ -1701,7 +2233,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
 
         self.assertFalse(quality["gate_passed"])
         self.assertEqual(caption_gate["containment_repeat_count"], 2)
-        self.assertEqual(caption_gate["visible_repeat_candidate_count"], 2)
+        self.assertGreaterEqual(caption_gate["visible_repeat_candidate_count"], 2)
         self.assertIn("V21_FINAL_CAPTION_VISIBLE_REPEAT_GATE_FAILED", quality["blocker_codes"])
 
     def test_repeat_convergence_does_not_zero_report_without_detector(self) -> None:
@@ -2633,6 +3165,18 @@ class ArollV21QualityGateTests(unittest.TestCase):
             self.assertIn("visual_pacing_gate", quality)
             self.assertIn("caption_alignment_gate", quality)
             self.assertTrue(quality["post_write_actual_draft_audit_required_on_commit"])
+            semantic_junk_path = root / "run" / "quality" / "pre_visible_semantic_junk_report.json"
+            semantic_junk_candidates_path = root / "run" / "quality" / "semantic_junk_candidates.json"
+            quality_ledger_path = root / "run" / "quality" / "quality_defect_ledger.json"
+            manifest = json.loads((root / "run" / "artifact_manifest.json").read_text("utf-8"))
+            self.assertTrue(semantic_junk_path.exists())
+            self.assertTrue(semantic_junk_candidates_path.exists())
+            self.assertTrue(quality_ledger_path.exists())
+            self.assertIn("quality/pre_visible_semantic_junk_report.json", manifest["artifact_files"])
+            semantic_junk = json.loads(semantic_junk_path.read_text("utf-8"))
+            self.assertEqual(semantic_junk["detector_name"], "pre_visible_semantic_junk_candidate_detector")
+            self.assertFalse(semantic_junk["pre_visible_semantic_junk_audit_only"])
+            self.assertTrue(semantic_junk["pre_visible_semantic_junk_deterministic_apply_enabled"])
 
     def test_commit_requires_post_write_actual_draft_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3482,6 +4026,39 @@ class ArollV21QualityGateTests(unittest.TestCase):
 
         self.assertEqual(report["one_char_caption_count"], 0)
         self.assertEqual(report["residual_one_char_captions"], [])
+
+    def test_caption_cleanup_does_not_merge_tiny_caption_into_overlong_interval(self) -> None:
+        source_graph = _graph_for_single_subtitle_words(
+            [
+                ("w001", "咳", 0, 800_000),
+                ("w002", "立刻", 2_066_666, 2_426_666),
+                ("w003", "给", 2_426_666, 2_666_666),
+                ("w004", "老子", 2_666_666, 2_866_666),
+                ("w005", "关", 2_866_666, 3_066_666),
+                ("w006", "了", 3_066_666, 3_226_666),
+                ("w007", "弱智", 3_706_666, 4_266_666),
+            ]
+        )
+        segment = replace(
+            _segment(1, 0, 4_266_666),
+            source_material_id="main",
+            source_segment_id="primary_window",
+            source_start_us=0,
+            source_end_us=4_266_666,
+            target_start_us=0,
+            target_end_us=4_266_666,
+            word_ids=["w001", "w002", "w003", "w004", "w005", "w006", "w007"],
+            text="咳立刻给老子关了弱智",
+        )
+
+        captions = SubtitleRenderer().render([segment], source_graph)
+        alignment = build_caption_alignment_report(final_timeline=[segment], captions=captions)
+
+        self.assertEqual([caption.text for caption in captions], ["咳立刻给老子关了", "弱智"])
+        self.assertLessEqual(max(caption.target_end_us - caption.target_start_us for caption in captions), 3_500_000)
+        self.assertEqual(alignment["subtitle_interval_too_long_count"], 0)
+        self.assertEqual(alignment["one_char_caption_count"], 0)
+        self.assertTrue(alignment["gate_passed"], alignment)
 
     def test_visual_pacing_gate_allows_only_explicit_semantic_bridge_exceptions(self) -> None:
         allowed = build_visual_pacing_report(

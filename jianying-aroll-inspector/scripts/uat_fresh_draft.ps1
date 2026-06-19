@@ -11,11 +11,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Get-DefaultRuntimeRoot {
-  if ($env:AUTO_CLIP_RUNTIME_DIR) {
-    return [string]$env:AUTO_CLIP_RUNTIME_DIR
+if ([string]::IsNullOrWhiteSpace($RunRoot)) {
+  $runtimeRoot = [string]$env:AUTO_CLIP_RUNTIME_DIR
+  if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+    $runtimeRoot = Join-Path $env:USERPROFILE ".auto_clip_runtime"
   }
-  return (Join-Path $HOME ".auto_clip_runtime")
+  $RunRoot = Join-Path $runtimeRoot "aroll_v21_uat_runs"
 }
 
 function Read-JsonFile([string]$Path) {
@@ -95,10 +96,44 @@ function Assert-True([bool]$Condition, [string]$Message) {
   }
 }
 
+function Resolve-PinnedJianyingInstallDir {
+  $pinRoot = [string]$env:JY_VERSION_PIN_ROOT
+  if (-not $pinRoot) {
+    $runtimeRoot = [string]$env:AUTO_CLIP_RUNTIME_DIR
+    if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+      $runtimeRoot = Join-Path $env:USERPROFILE ".auto_clip_runtime"
+    }
+    $pinRoot = Join-Path $runtimeRoot "jianying_version_pin"
+  }
+  if (-not (Test-Path -LiteralPath $pinRoot)) {
+    return ""
+  }
+
+  $manifests = @(Get-ChildItem -LiteralPath $pinRoot -Filter "pin_manifest.json" -Recurse -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending)
+  foreach ($manifest in $manifests) {
+    try {
+      $pin = Get-Content -LiteralPath $manifest.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+      continue
+    }
+    $installDir = [string]$pin.pinned_install_dir
+    if ($installDir -and (Test-Path -LiteralPath (Join-Path $installDir "videoeditor.dll"))) {
+      return $installDir
+    }
+  }
+  return ""
+}
+
 function Resolve-JianyingInstallDir {
   $configured = [string]$env:JY_INSTALL_DIR
   if ($configured -and (Test-Path -LiteralPath (Join-Path $configured "videoeditor.dll"))) {
     return $configured
+  }
+
+  $pinned = Resolve-PinnedJianyingInstallDir
+  if ($pinned) {
+    return $pinned
   }
 
   $roots = @()
@@ -111,9 +146,7 @@ function Resolve-JianyingInstallDir {
       $roots += $parent
     }
   }
-  if ($env:ProgramFiles) {
-    $roots += (Join-Path $env:ProgramFiles "JianyingPro")
-  }
+  $roots += "D:\JianyingPro"
   $roots = $roots | Where-Object { $_ } | Select-Object -Unique
 
   $candidates = @()
@@ -175,9 +208,6 @@ if (-not (Test-Path -LiteralPath $DraftDir)) {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $repoRoot "src"
-if ([string]::IsNullOrWhiteSpace($RunRoot)) {
-  $RunRoot = Join-Path (Get-DefaultRuntimeRoot) "aroll_v21_uat_runs"
-}
 Sync-JyDraftcEnv
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runDir = ""

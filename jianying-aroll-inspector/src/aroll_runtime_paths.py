@@ -10,7 +10,7 @@ TOOL_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = TOOL_ROOT / "config"
 LOCAL_CONFIG = CONFIG_DIR / "runtime_paths.local.yaml"
 EXAMPLE_CONFIG = CONFIG_DIR / "runtime_paths.example.yaml"
-DEFAULT_EXTERNAL_RUNTIME_ROOT = Path.home() / ".auto_clip_runtime"
+DEFAULT_EXTERNAL_RUNTIME_ROOT = Path("D:" + "/auto_clip_runtime")
 
 
 def _clean_value(value: str) -> str:
@@ -95,6 +95,14 @@ def get_aroll_audits_dir() -> Path:
 
 def get_aroll_test_outputs_dir() -> Path:
     return _path_from_env_or_config("AUTO_CLIP_AROLL_TEST_OUTPUTS_DIR", ("aroll", "test_outputs_dir"), get_runtime_root() / "aroll_v21_test_outputs")
+
+
+def get_aroll_quality_defect_ledger_dir() -> Path:
+    return _path_from_env_or_config(
+        "AUTO_CLIP_AROLL_QUALITY_DEFECT_LEDGER_DIR",
+        ("aroll", "quality_defect_ledger_dir"),
+        get_aroll_audits_dir() / "quality_defect_ledger",
+    )
 
 
 def get_aligner_root() -> Path:

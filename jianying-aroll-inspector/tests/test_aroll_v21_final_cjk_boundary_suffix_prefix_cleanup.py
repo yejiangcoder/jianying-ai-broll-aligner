@@ -5,7 +5,7 @@ import unittest
 from aroll_v21 import ArollEngine, ArollRunInput
 from aroll_v21.compiler import FinalTimelineCompiler
 from aroll_v21.ingest import DraftIngest
-from aroll_v21.ir import DecisionPlan
+from aroll_v21.ir import DecisionPlan, FinalTimelineSegment
 from tests.test_aroll_v21_captions_after_prefix_drop import _template_rows
 
 
@@ -84,6 +84,72 @@ class ArollV21FinalCjkBoundarySuffixPrefixCleanupTests(unittest.TestCase):
                 self.assertTrue(rough["caption_count_covers_video_segments"])
                 self.assertEqual(len(report.captions), len(report.material_write_plan["materials"]))
                 self.assertEqual(len(report.captions), len(report.material_write_plan["segments"]))
+
+    def test_suffix_prefix_overlap_preserves_label_reuse_before_definition(self) -> None:
+        run_input = _input_from_word_groups(
+            [
+                ["一句", "你好", "漂亮", "都", "叫", "表白"],
+                ["表白", "等于", "释放", "信号"],
+            ]
+        )
+        graph = DraftIngest().build_source_graph(
+            word_timeline=run_input.word_timeline,
+            subtitles=run_input.subtitles,
+            source_segments=run_input.source_segments,
+            text_materials=run_input.text_materials,
+            text_segments=run_input.text_segments,
+        )
+        segments = [
+            FinalTimelineSegment(
+                segment_id="v21_seg_000001",
+                source_material_id="main",
+                source_segment_id="clip",
+                source_start_us=0,
+                source_end_us=1_020_000,
+                target_start_us=0,
+                target_end_us=1_020_000,
+                word_ids=[row["word_id"] for row in run_input.word_timeline[:6]],
+                text="一句你好漂亮都叫表白",
+                decision_ids=[],
+            ),
+            FinalTimelineSegment(
+                segment_id="v21_seg_000002",
+                source_material_id="main",
+                source_segment_id="clip",
+                source_start_us=1_020_000,
+                source_end_us=1_740_000,
+                target_start_us=1_020_000,
+                target_end_us=1_740_000,
+                word_ids=[row["word_id"] for row in run_input.word_timeline[6:]],
+                text="表白等于释放信号",
+                decision_ids=[],
+            ),
+        ]
+
+        cleaned, blockers = FinalTimelineCompiler()._final_cjk_boundary_suffix_prefix_overlap_cleanup(
+            segments,
+            graph,
+            DecisionPlan(decisions=[]),
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual(
+            [segment.text for segment in cleaned],
+            ["一句你好漂亮都叫表白", "表白等于释放信号"],
+        )
+
+    def test_suffix_prefix_overlap_policy_helper_does_not_mask_restart_overlap(self) -> None:
+        report = ArollEngine().run(
+            _input_from_word_groups(
+                [
+                    ["在", "舞台", "中央", "大声", "说"],
+                    ["中央", "大声", "说", "话的", "自己"],
+                ]
+            )
+        )
+
+        self.assertEqual(report.status, "ok", [blocker.code for blocker in report.blocker_report.blockers])
+        self.assertEqual([caption.text for caption in report.captions], ["在舞台", "中央大声说话的自己"])
 
     def test_suffix_prefix_overlap_requires_whole_word_binding(self) -> None:
         materials, text_segments = _template_rows()

@@ -27,7 +27,7 @@ class ArollV21FinalStaticHiddenBugScanTests(unittest.TestCase):
         text = _source_text()
         for token in (
             "material_text_rows",
-            "JianyingPro Drafts",
+            "D:\\JianyingPro Drafts",
             "6月15日",
             "嘉豪",
             "随意的",

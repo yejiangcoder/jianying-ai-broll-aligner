@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, CaptionRenderUnit, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import is_explanatory_term_reuse, is_semantic_label_reuse_boundary
 from aroll_v21.quality.final_caption_visible_repeat import build_final_caption_visible_repeat_gate
 from aroll_v21.quality.subtitle_readability import (
     HARD_MAX_CHARS,
@@ -200,13 +201,21 @@ def _merged_caption(left: CaptionRenderUnit, right: CaptionRenderUnit) -> Captio
     if int(second.target_start_us) < int(first.target_end_us):
         overlapping: CaptionRenderUnit | None = None
         return overlapping
+    target_start_us = int(first.target_start_us)
+    target_end_us = int(second.target_end_us)
+    compact_window = _compact_overlong_tiny_caption_merge_window(first, second)
+    if compact_window is not None:
+        target_start_us, target_end_us = compact_window
+    elif target_end_us - target_start_us > HARD_MAX_DURATION_US:
+        too_long: CaptionRenderUnit | None = None
+        return too_long
     return replace(
         first,
         timeline_segment_ids=sorted(set([*first.timeline_segment_ids, *second.timeline_segment_ids])),
         word_ids=[*first.word_ids, *second.word_ids],
         text=text,
-        target_start_us=int(first.target_start_us),
-        target_end_us=int(second.target_end_us),
+        target_start_us=target_start_us,
+        target_end_us=target_end_us,
         source_subtitle_uids=_unique([*first.source_subtitle_uids, *second.source_subtitle_uids]),
         spoken_source_start_us=min(
             value
@@ -224,6 +233,29 @@ def _merged_caption(left: CaptionRenderUnit, right: CaptionRenderUnit) -> Captio
         else None,
         containing_video_segment_id=first.containing_video_segment_id,
     )
+
+
+def _compact_overlong_tiny_caption_merge_window(
+    first: CaptionRenderUnit,
+    second: CaptionRenderUnit,
+) -> tuple[int, int] | None:
+    target_start_us = int(first.target_start_us)
+    target_end_us = int(second.target_end_us)
+    if target_end_us - target_start_us <= HARD_MAX_DURATION_US:
+        no_compaction: tuple[int, int] | None = None
+        return no_compaction
+    first_text_len = len(normalize_text(str(first.text or "")))
+    second_text_len = len(normalize_text(str(second.text or "")))
+    if first_text_len <= 1 and int(second.target_end_us) - int(second.target_start_us) <= HARD_MAX_DURATION_US:
+        compact_start = max(target_start_us, target_end_us - HARD_MAX_DURATION_US)
+        if compact_start <= int(first.target_end_us):
+            return compact_start, target_end_us
+    if second_text_len <= 1 and int(first.target_end_us) - int(first.target_start_us) <= HARD_MAX_DURATION_US:
+        compact_end = min(target_end_us, target_start_us + HARD_MAX_DURATION_US)
+        if compact_end >= int(second.target_start_us):
+            return target_start_us, compact_end
+    no_compaction: tuple[int, int] | None = None
+    return no_compaction
 
 
 def _extend_caption_inside_container(
@@ -293,11 +325,27 @@ def _repair_repeat_candidate(
         return no_repair
     left = captions[left_index]
     right = captions[right_index]
+    if not set(left.word_ids).intersection(set(right.word_ids)) and _disjoint_repeat_should_keep_both(left, right):
+        no_repair: list[CaptionRenderUnit] | None = None
+        return no_repair
     drop_index = _deterministic_repeat_drop_index(left, right, reason, left_index, right_index)
     if drop_index is None:
         no_repair: list[CaptionRenderUnit] | None = None
         return no_repair
     return [*captions[:drop_index], *captions[drop_index + 1 :]]
+
+
+def _disjoint_repeat_should_keep_both(left: CaptionRenderUnit, right: CaptionRenderUnit) -> bool:
+    left_text = normalize_text(left.text)
+    right_text = normalize_text(right.text)
+    if is_explanatory_term_reuse(left_text, right_text) or is_explanatory_term_reuse(right_text, left_text):
+        return True
+    overlap = left_text if right_text.startswith(left_text) else right_text if left_text.startswith(right_text) else ""
+    if overlap and is_semantic_label_reuse_boundary(left_text, right_text, overlap):
+        return True
+    if overlap and is_semantic_label_reuse_boundary(right_text, left_text, overlap):
+        return True
+    return False
 
 
 def _deterministic_repeat_drop_index(

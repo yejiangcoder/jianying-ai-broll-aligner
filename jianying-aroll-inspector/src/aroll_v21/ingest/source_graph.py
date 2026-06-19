@@ -32,6 +32,26 @@ _RESULT_COMPLEMENT_STARTS = (
     "好",
     "进",
 )
+_LEXICAL_REDUPLICATION_BOUNDARY_WORDS = ("上", "里", "中", "下", "的", "款", "版", "版型")
+_LEXICAL_REDUPLICATION_PREFIX_STOPWORDS = (
+    "你",
+    "我",
+    "他",
+    "她",
+    "它",
+    "这",
+    "那",
+    "就",
+    "也",
+    "还",
+    "都",
+    "不",
+    "没",
+    "很",
+    "更",
+    "再",
+    "又",
+)
 
 
 def _text(row: dict[str, Any]) -> str:
@@ -394,8 +414,9 @@ class DraftIngest:
 def _normalize_intraword_cjk_restarts(words: list[CanonicalWord]) -> list[CanonicalWord]:
     normalized: list[CanonicalWord] = []
     for index, word in enumerate(words):
+        previous_text = words[index - 1].text if index > 0 else ""
         next_text = words[index + 1].text if index + 1 < len(words) else ""
-        replacement = _intraword_cjk_restart_replacement(word.text, next_text)
+        replacement = _intraword_cjk_restart_replacement(word.text, next_text, previous_text)
         if replacement is None or replacement == word.text:
             normalized.append(word)
             continue
@@ -404,10 +425,15 @@ def _normalize_intraword_cjk_restarts(words: list[CanonicalWord]) -> list[Canoni
                 word,
                 text=replacement,
                 normalized_text=normalize_text(replacement),
+                source_start_us=_trimmed_intraword_source_start_us(word, replacement),
                 debug_hints={
                     **dict(word.debug_hints or {}),
                     "intraword_cjk_restart_normalized": True,
                     "original_text": word.text,
+                    "original_source_start_us": int(word.source_start_us),
+                    "original_source_end_us": int(word.source_end_us),
+                    "trimmed_source_start_us": _trimmed_intraword_source_start_us(word, replacement),
+                    "trimmed_leading_char_count": _intraword_leading_drop_char_count(word.text, replacement),
                     "normalization_reason": "leading_single_char_restart_before_result_complement",
                 },
             )
@@ -415,9 +441,12 @@ def _normalize_intraword_cjk_restarts(words: list[CanonicalWord]) -> list[Canoni
     return normalized
 
 
-def _intraword_cjk_restart_replacement(text: str, next_text: str) -> str | None:
+def _intraword_cjk_restart_replacement(text: str, next_text: str, previous_text: str = "") -> str | None:
     raw = str(text or "")
     if not raw or not _CJK_TEXT_RE.fullmatch(raw):
+        no_replacement: str | None = None
+        return no_replacement
+    if _looks_like_prefixed_reduplicated_lexeme(raw, next_text, previous_text):
         no_replacement: str | None = None
         return no_replacement
     if len(raw) >= 3 and raw[0] == raw[1] and raw[2:].startswith(_RESULT_COMPLEMENT_STARTS):
@@ -431,3 +460,32 @@ def _intraword_cjk_restart_replacement(text: str, next_text: str) -> str | None:
         return raw[0]
     no_replacement: str | None = None
     return no_replacement
+
+
+def _looks_like_prefixed_reduplicated_lexeme(raw: str, next_text: str, previous_text: str) -> bool:
+    previous_normalized = normalize_text(previous_text)
+    next_normalized = normalize_text(next_text)
+    if len(raw) != 2 or raw[0] != raw[1]:
+        return False
+    if len(previous_normalized) != 1 or previous_normalized in _LEXICAL_REDUPLICATION_PREFIX_STOPWORDS:
+        return False
+    if not _CJK_TEXT_RE.fullmatch(previous_normalized):
+        return False
+    return bool(next_normalized) and next_normalized.startswith(_LEXICAL_REDUPLICATION_BOUNDARY_WORDS)
+
+
+def _trimmed_intraword_source_start_us(word: CanonicalWord, replacement: str) -> int:
+    drop_chars = _intraword_leading_drop_char_count(word.text, replacement)
+    if drop_chars <= 0:
+        return int(word.source_start_us)
+    raw_len = max(1, len(str(word.text or "")))
+    duration_us = max(0, int(word.source_end_us) - int(word.source_start_us))
+    shifted = int(word.source_start_us) + round(duration_us * drop_chars / raw_len)
+    return min(max(int(word.source_start_us), shifted), max(int(word.source_start_us), int(word.source_end_us) - 1))
+
+
+def _intraword_leading_drop_char_count(text: str, replacement: str) -> int:
+    raw = str(text or "")
+    if not raw or not replacement or not raw.endswith(replacement):
+        return 0
+    return max(0, len(raw) - len(replacement))

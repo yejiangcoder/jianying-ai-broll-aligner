@@ -4,6 +4,7 @@ aroll:
   runs_dir: "${HOME}/.auto_clip_runtime/aroll_v21_uat_runs"
   audits_dir: "${HOME}/.auto_clip_runtime/aroll_v21_audits"
   test_outputs_dir: "${HOME}/.auto_clip_runtime/aroll_v21_test_outputs"
+  quality_defect_ledger_dir: "${HOME}/.auto_clip_runtime/aroll_v21_audits/quality_defect_ledger"
   backups_dir: "${HOME}/.auto_clip_runtime/aroll_v21_backups"
 
 broll:

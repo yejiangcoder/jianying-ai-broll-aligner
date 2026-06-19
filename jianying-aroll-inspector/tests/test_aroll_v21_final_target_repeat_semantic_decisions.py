@@ -51,6 +51,33 @@ class ArollV21FinalTargetRepeatSemanticDecisionTests(unittest.TestCase):
         self.assertTrue(plan.write_allowed)
         self.assertEqual(plan.decision_trace[-1]["decision"], "keep_longest_drop_others")
 
+    def test_keep_longest_uses_source_contiguous_continuation_for_complete_take(self) -> None:
+        plan = _plan_with_rows(
+            [
+                {
+                    "cluster_id": "final_target_repeat_tc_0001",
+                    "decision": "keep_longest_drop_others",
+                    "reason": "keep the semantically complete take including its continuation",
+                    "confidence": 0.88,
+                    "requires_human_review": False,
+                }
+            ]
+        )
+        left_fragment = segment(1, "老子最烦这种深夜准时发作的土味", start_us=0)
+        right_restart = segment(2, "老子最烦这种深夜", start_us=1_000_000)
+        right_continuation = segment(3, "准时发作的土味纯爱逼", start_us=1_360_000)
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [left_fragment, right_restart, right_continuation],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([row.text for row in final_timeline], ["老子最烦这种深夜", "准时发作的土味纯爱逼"])
+        self.assertEqual(plan.decision_trace[-1]["decision"], "keep_longest_drop_others")
+        self.assertEqual(plan.decision_trace[-1]["dropped_segment_indices"], [1])
+        self.assertTrue(plan.write_allowed)
+
     def test_keep_all_accepts_repeat_without_timeline_delete(self) -> None:
         plan = _plan_with_rows(
             [

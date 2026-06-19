@@ -126,6 +126,6 @@ deepseek_decisions.json
 ## 附录：V21 入口
 
 ```powershell
-cd "<repo>\jianying-aroll-inspector"
+cd "<suite-root>\jianying-aroll-inspector"
 .\run_aroll_v21_operator.ps1 -DraftDir "EDIT_ME_DRAFT_DIR" -RunDir "EDIT_ME_RUN_DIR" -Mode dry-run
 ```

@@ -1462,6 +1462,17 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path, *, report_profi
         "run_summary.json": build_run_summary(run_report),
         "run_report.json": run_report,
     }
+    repair_payload = (validator_payload or {}).get("final_visible_caption_repair_report") if isinstance(validator_payload, dict) else {}
+    semantic_junk_report = repair_payload.get("pre_visible_semantic_junk_report") if isinstance(repair_payload, dict) else {}
+    if isinstance(semantic_junk_report, dict):
+        artifacts["quality/pre_visible_semantic_junk_report.json"] = semantic_junk_report
+        artifacts["quality/semantic_junk_candidates.json"] = list(semantic_junk_report.get("pre_visible_semantic_junk_candidates") or [])
+        artifacts["quality/quality_defect_ledger.json"] = {
+            "ledger_kind": "quality_defect_ledger_runtime_seed",
+            "source": "pre_visible_semantic_junk_candidate_detector",
+            "candidate_count": int(semantic_junk_report.get("pre_visible_semantic_junk_candidate_count") or 0),
+            "candidates": list(semantic_junk_report.get("pre_visible_semantic_junk_candidates") or []),
+        }
     compressed_artifacts: dict[str, Any] = {}
     if effective_profile == "minimal":
         artifacts = {
@@ -1484,9 +1495,13 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path, *, report_profi
         if not semantic_report_payload.get("deepseek_batch_error"):
             artifacts.pop("deepseek_batch_error.json", None)
     for name, payload in artifacts.items():
-        (output_dir / name).write_text(json.dumps(dataclass_to_dict(payload), ensure_ascii=False, indent=2), "utf-8")
+        artifact_path = output_dir / name
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps(dataclass_to_dict(payload), ensure_ascii=False, indent=2), "utf-8")
     for name, payload in compressed_artifacts.items():
-        with gzip.open(output_dir / name, "wt", encoding="utf-8") as f:
+        artifact_path = output_dir / name
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(artifact_path, "wt", encoding="utf-8") as f:
             json.dump(dataclass_to_dict(payload), f, ensure_ascii=False, separators=(",", ":"))
 
 

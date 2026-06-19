@@ -22,6 +22,8 @@ FINAL_TARGET_REPEAT_DECISIONS = {
 
 NEAR_DUPLICATE_SIMILARITY_DROP_THRESHOLD = 0.90
 MAX_FINAL_REPEAT_CONVERGENCE_ITERATIONS = 3
+MAX_SEMANTIC_EXTENSION_SEGMENTS = 2
+MAX_SEMANTIC_EXTENSION_GAP_US = 500_000
 
 
 class FinalTargetRepeatResolver:
@@ -401,7 +403,125 @@ class FinalTargetRepeatResolver:
             if str(segment.text or "").strip()
         ]
         clusters, _report = build_take_clusters(rows, [], window=5)
-        return clusters
+        return self._augment_semantic_containment_context(clusters, segments)
+
+    def _augment_semantic_containment_context(
+        self,
+        clusters: list[dict[str, Any]],
+        segments: list[FinalTimelineSegment],
+    ) -> list[dict[str, Any]]:
+        index_to_segment = {index: segment for index, segment in enumerate(segments, start=1)}
+        augmented: list[dict[str, Any]] = []
+        for cluster in clusters:
+            if str(cluster.get("cluster_type") or "") != "semantic_containment_take":
+                augmented.append(cluster)
+                continue
+            items = [dict(item) for item in list(cluster.get("items") or []) if isinstance(item, dict)]
+            if len(items) < 2:
+                augmented.append(cluster)
+                continue
+            changed = False
+            for item_index, item in enumerate(items[:2]):
+                other = items[1 - item_index]
+                extension = self._semantic_extension_for_item(item, other, index_to_segment)
+                if extension is None:
+                    continue
+                item.update(extension)
+                changed = True
+            if not changed:
+                augmented.append(cluster)
+                continue
+            rewritten = dict(cluster)
+            rewritten["items"] = items
+            rewritten["candidates"] = self._rewrite_cluster_candidates_with_semantic_text(cluster, items)
+            augmented.append(rewritten)
+        return augmented
+
+    def _semantic_extension_for_item(
+        self,
+        item: dict[str, Any],
+        other: dict[str, Any],
+        index_to_segment: dict[int, FinalTimelineSegment],
+    ) -> dict[str, Any] | None:
+        base_index = int(item.get("subtitle_index") or 0)
+        if base_index <= 0:
+            return None
+        base_segment = index_to_segment.get(base_index)
+        if base_segment is None:
+            return None
+        base_text = normalize_text(str(item.get("text") or item.get("subtitle_text") or ""))
+        other_text = normalize_text(str(other.get("text") or other.get("subtitle_text") or ""))
+        if not base_text or not other_text or not other_text.startswith(base_text):
+            return None
+        current_text = str(item.get("text") or item.get("subtitle_text") or "")
+        current_norm = normalize_text(current_text)
+        extension_indices: list[int] = []
+        extension_segment_ids: list[str] = []
+        previous = base_segment
+        for offset in range(1, MAX_SEMANTIC_EXTENSION_SEGMENTS + 1):
+            next_index = base_index + offset
+            next_segment = index_to_segment.get(next_index)
+            if next_segment is None:
+                break
+            if not self._segments_source_contiguous(previous, next_segment):
+                break
+            next_text = str(next_segment.text or "")
+            next_norm = normalize_text(next_text)
+            if not next_norm:
+                break
+            proposed_norm = normalize_text(current_text + next_text)
+            if not proposed_norm.startswith(current_norm):
+                break
+            current_text += next_text
+            current_norm = proposed_norm
+            extension_indices.append(next_index)
+            extension_segment_ids.append(next_segment.segment_id)
+            previous = next_segment
+            if current_norm.startswith(other_text) and len(current_norm) > len(other_text):
+                break
+        if not extension_indices:
+            return None
+        if not (current_norm.startswith(other_text) and len(current_norm) > len(other_text)):
+            return None
+        return {
+            "semantic_text": current_text,
+            "decision_text": current_text,
+            "semantic_extension_indices": extension_indices,
+            "semantic_extension_segment_ids": extension_segment_ids,
+        }
+
+    def _segments_source_contiguous(self, left: FinalTimelineSegment, right: FinalTimelineSegment) -> bool:
+        if str(left.source_material_id or "") and str(right.source_material_id or "") and str(left.source_material_id) != str(right.source_material_id):
+            return False
+        if str(left.source_segment_id or "") and str(right.source_segment_id or "") and str(left.source_segment_id) != str(right.source_segment_id):
+            return False
+        source_gap_us = int(right.source_start_us) - int(left.source_end_us)
+        return -80_000 <= source_gap_us <= MAX_SEMANTIC_EXTENSION_GAP_US
+
+    def _rewrite_cluster_candidates_with_semantic_text(
+        self,
+        cluster: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        candidates = [dict(row) for row in list(cluster.get("candidates") or []) if isinstance(row, dict)]
+        item_by_index = {int(item.get("subtitle_index") or 0): item for item in items}
+        for candidate in candidates:
+            indices = [int(index or 0) for index in list(candidate.get("subtitle_indices") or [])]
+            if len(indices) != 1:
+                continue
+            item = item_by_index.get(indices[0])
+            if item is None:
+                continue
+            decision_text = self._item_decision_text(item)
+            if decision_text:
+                candidate["text"] = decision_text
+                candidate["norm_text"] = normalize_text(decision_text)
+            extension_indices = [int(index or 0) for index in list(item.get("semantic_extension_indices") or []) if int(index or 0) > 0]
+            if extension_indices:
+                candidate["subtitle_indices"] = [indices[0], *extension_indices]
+                candidate["semantic_extension_indices"] = extension_indices
+                candidate["semantic_extension_segment_ids"] = list(item.get("semantic_extension_segment_ids") or [])
+        return candidates
 
     def _is_high_near_duplicate_auto_drop(self, cluster: dict[str, Any]) -> bool:
         if str(cluster.get("cluster_type") or "") != "near_duplicate_take":
@@ -526,8 +646,8 @@ class FinalTargetRepeatResolver:
         items = [item for item in list(cluster.get("items") or []) if isinstance(item, dict)]
         if len(items) < 2:
             return None
-        left = normalize_text(str(items[0].get("text") or items[0].get("subtitle_text") or ""))
-        right = normalize_text(str(items[1].get("text") or items[1].get("subtitle_text") or ""))
+        left = normalize_text(self._item_decision_text(items[0]))
+        right = normalize_text(self._item_decision_text(items[1]))
         if not left or not right:
             return None
         return left, right
@@ -559,12 +679,19 @@ class FinalTargetRepeatResolver:
             issue_type = "ambiguous_repeat"
         candidates = []
         for role, item in zip(("left", "right"), items[:2]):
+            decision_text = self._item_decision_text(item)
             candidates.append(
                 {
                     "role": role,
-                    "text": str(item.get("text") or ""),
+                    "text": decision_text,
                     "subtitle_index": int(item.get("subtitle_index") or 0),
                     "candidate_id": str(item.get("subtitle_uid") or ""),
+                    "semantic_extension_indices": [
+                        int(index or 0)
+                        for index in list(item.get("semantic_extension_indices") or [])
+                        if int(index or 0) > 0
+                    ],
+                    "semantic_extension_segment_ids": list(item.get("semantic_extension_segment_ids") or []),
                 }
             )
         decision_plan.semantic_request_payloads.append(
@@ -608,22 +735,35 @@ class FinalTargetRepeatResolver:
         items = list(cluster.get("items") or [])
         if len(items) < 2:
             return []
-        indices = [int(item.get("subtitle_index") or 0) for item in items if int(item.get("subtitle_index") or 0) > 0]
+        grouped_indices = [self._item_drop_indices(item) for item in items]
+        indices = [index for group in grouped_indices for index in group]
         if decision == "drop_left":
-            return indices[:1]
+            return grouped_indices[0]
         if decision == "drop_right":
-            return indices[-1:]
+            return grouped_indices[-1]
         if decision == "keep_longest_drop_others":
             longest_index = 0
             longest_len = -1
             for idx, item in enumerate(items):
-                text_len = len(normalize_text(str(item.get("text") or "")))
+                text_len = len(normalize_text(self._item_decision_text(item)))
                 if text_len > longest_len:
                     longest_index = idx
                     longest_len = text_len
-            keep = int(items[longest_index].get("subtitle_index") or 0)
-            return [index for index in indices if index != keep]
+            keep = set(grouped_indices[longest_index])
+            return [index for index in indices if index not in keep]
         return []
+
+    def _item_decision_text(self, item: dict[str, Any]) -> str:
+        return str(item.get("decision_text") or item.get("semantic_text") or item.get("text") or item.get("subtitle_text") or "")
+
+    def _item_drop_indices(self, item: dict[str, Any]) -> list[int]:
+        index = int(item.get("subtitle_index") or 0)
+        indices = [index] if index > 0 else []
+        for value in list(item.get("semantic_extension_indices") or []):
+            extension_index = int(value or 0)
+            if extension_index > 0:
+                indices.append(extension_index)
+        return sorted(set(indices))
 
     def _repack(self, segments: list[FinalTimelineSegment]) -> list[FinalTimelineSegment]:
         repacked: list[FinalTimelineSegment] = []

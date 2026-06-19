@@ -9,6 +9,10 @@ from aroll_v21.decision.deterministic_baseline_policy import DeterministicBaseli
 from aroll_v21.decision.semantic_decision_planner import FORBIDDEN_DEEPSEEK_FIELDS
 from aroll_v21.decision.final_target_repeat_resolver import FinalTargetRepeatResolver
 from aroll_v21.ir.models import Blocker, CanonicalSourceGraph, DecisionPlan, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import (
+    boundary_suffix_prefix_overlap,
+    is_semantic_label_reuse_boundary,
+)
 
 
 class FinalTimelineCompiler:
@@ -658,6 +662,8 @@ class FinalTimelineCompiler:
                 overlap = self._boundary_suffix_prefix_overlap(left.text, right.text)
                 if len(overlap) < 2:
                     continue
+                if is_semantic_label_reuse_boundary(left.text, right.text, overlap):
+                    continue
                 drop_word_ids = self._trailing_word_ids_for_overlap(left, word_lookup, overlap)
                 if not drop_word_ids:
                     blockers.append(
@@ -737,14 +743,7 @@ class FinalTimelineCompiler:
                 return current, []
 
     def _boundary_suffix_prefix_overlap(self, left_text: str, right_text: str) -> str:
-        left = normalize_text(left_text)
-        right = normalize_text(right_text)
-        max_len = min(len(left), len(right))
-        for size in range(max_len, 1, -1):
-            candidate = left[-size:]
-            if right.startswith(candidate):
-                return candidate
-        return ""
+        return boundary_suffix_prefix_overlap(left_text, right_text)
 
     def _trailing_word_ids_for_overlap(
         self,

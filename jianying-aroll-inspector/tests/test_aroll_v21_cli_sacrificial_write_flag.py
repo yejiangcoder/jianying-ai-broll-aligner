@@ -14,9 +14,9 @@ class ArollV21CliSacrificialWriteFlagTests(unittest.TestCase):
             [
                 "aroll_v21.cli",
                 "--draft-dir",
-                "sample_draft",
+                "D:/draft",
                 "--output-dir",
-                "sample_run",
+                "D:/run",
                 "--mode",
                 "write",
                 "--semantic-mode",
@@ -27,8 +27,8 @@ class ArollV21CliSacrificialWriteFlagTests(unittest.TestCase):
         ):
             args = parse_args()
 
-        self.assertEqual(args.draft_dir, Path("sample_draft"))
-        self.assertEqual(args.run_dir, Path("sample_run"))
+        self.assertEqual(args.draft_dir, Path("D:/draft"))
+        self.assertEqual(args.run_dir, Path("D:/run"))
         self.assertEqual(args.mode, "write")
         self.assertEqual(args.semantic_mode, "fail-closed")
         self.assertTrue(args.commit)
@@ -56,9 +56,9 @@ class ArollV21CliSacrificialWriteFlagTests(unittest.TestCase):
             [
                 "aroll_v21.cli",
                 "--input-json",
-                "input.json",
+                "D:/input.json",
                 "--output-dir",
-                "sample_run",
+                "D:/run",
             ],
         ):
             args = parse_args()

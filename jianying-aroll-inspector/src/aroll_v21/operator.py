@@ -410,9 +410,9 @@ def _write_artifact_manifest(
         "ready_for_disposable_write_pre_audit": bool(summary.get("READY_FOR_DISPOSABLE_WRITE_PRE_AUDIT")),
         "blocker_codes": list(summary.get("blocker_codes") or []),
         "artifact_files": sorted(
-            path.name
-            for pattern in ("*.json", "*.json.gz")
-            for path in run_dir.glob(pattern)
+            str(path.relative_to(run_dir)).replace("\\", "/")
+            for pattern in ("*.json", "*.json.gz", "*.md")
+            for path in run_dir.rglob(pattern)
             if path.is_file() and path.name != "artifact_manifest.json"
         ),
         "artifact_hashes": _artifact_hashes(run_dir, reuse_artifacts),

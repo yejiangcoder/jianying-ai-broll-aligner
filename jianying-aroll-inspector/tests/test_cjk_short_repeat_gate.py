@@ -105,6 +105,40 @@ class CjkShortRepeatGateTest(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_label_reuse_before_definition_passes_within_caption(self) -> None:
+        candidates = detect_cjk_short_repeats(
+            [{"fragment_id": "f1", "fragment_text": "这种行为都叫表白，表白等于释放信号"}]
+        )
+
+        self.assertFalse(
+            any(
+                row["type"] == "boundary_prefix_containment"
+                and row["overlap"] == "表白"
+                for row in candidates
+            ),
+            candidates,
+        )
+
+    def test_label_reuse_before_definition_passes_across_subtitle_boundary(self) -> None:
+        report = build_final_repeat_gate_report(
+            {"issues": []},
+            [
+                {"fragment_id": "f1", "fragment_text": "这种行为都叫表白"},
+                {"fragment_id": "f2", "fragment_text": "表白等于释放信号"},
+            ],
+        )
+
+        self.assertTrue(report["final_repeat_gate_passed"], report)
+        self.assertEqual(report["final_cjk_short_repeat_fatal_count"], 0)
+        self.assertFalse(
+            any(
+                row["type"] == "boundary_prefix_containment"
+                and row["overlap"] == "表白"
+                for row in report["blocking_issues"]
+            ),
+            report,
+        )
+
     def test_detects_exact_short_repeat(self) -> None:
         candidates = detect_cjk_short_repeats(
             [{"fragment_id": "f1", "fragment_text": "然后然后"}]

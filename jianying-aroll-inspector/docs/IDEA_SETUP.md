@@ -3,7 +3,7 @@
 Open only:
 
 ```text
-<repo>\jianying-aroll-inspector
+<suite-root>\jianying-aroll-inspector
 ```
 
 Do not add this directory as a content root:

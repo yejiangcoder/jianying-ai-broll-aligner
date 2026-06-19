@@ -63,13 +63,13 @@ def merge_tiny_display_fragments(chunks: list[list[Any]]) -> list[list[Any]]:
         chunk = chunks[index]
         if _chunk_text_len(chunk) < 2 and index + 1 < len(chunks):
             candidate = chunk + chunks[index + 1]
-            if _chunk_text_len(candidate) <= HARD_MAX_CHARS:
+            if _chunk_text_len(candidate) <= HARD_MAX_CHARS and _chunk_duration_us(candidate) <= HARD_MAX_DURATION_US:
                 merged.append(candidate)
                 index += 2
                 continue
         if _chunk_text_len(chunk) < 2 and merged:
             candidate = merged[-1] + chunk
-            if _chunk_text_len(candidate) <= HARD_MAX_CHARS:
+            if _chunk_text_len(candidate) <= HARD_MAX_CHARS and _chunk_duration_us(candidate) <= HARD_MAX_DURATION_US:
                 merged[-1] = candidate
                 index += 1
                 continue

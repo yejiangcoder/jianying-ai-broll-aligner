@@ -52,6 +52,63 @@ def json_blob(data: Any) -> str:
         return str(data)
 
 
+def normalize_media_path(path_value: str) -> str:
+    return str(path_value or "").replace("\\", "/").rstrip("/")
+
+
+def media_path_under_root(path_value: str, root_value: str) -> bool:
+    path = normalize_media_path(path_value).casefold()
+    root = normalize_media_path(root_value).casefold()
+    if not path or not root:
+        return False
+    return path == root or path.startswith(root + "/")
+
+
+def summarize_media(data: Any, expected_source_media_root: str = "") -> dict[str, Any]:
+    videos = []
+    if isinstance(data, dict):
+        materials = data.get("materials")
+        if isinstance(materials, dict) and isinstance(materials.get("videos"), list):
+            videos = [row for row in materials.get("videos") or [] if isinstance(row, dict)]
+
+    material_paths: list[str] = []
+    material_names: list[str] = []
+    seen_paths: set[str] = set()
+    seen_names: set[str] = set()
+    for row in videos:
+        path = str(row.get("path") or "")
+        name = str(row.get("material_name") or row.get("name") or "")
+        path_key = normalize_media_path(path).casefold()
+        name_key = name.casefold()
+        if path and path_key not in seen_paths:
+            material_paths.append(path)
+            seen_paths.add(path_key)
+        if name and name_key not in seen_names:
+            material_names.append(name)
+            seen_names.add(name_key)
+
+    expected_root = normalize_media_path(expected_source_media_root)
+    source_media_root_ok: bool | None = None
+    source_media_root_mismatches: list[str] = []
+    source_media_root_missing_path_count = 0
+    if expected_root:
+        source_media_root_missing_path_count = sum(1 for row in videos if not str(row.get("path") or ""))
+        source_media_root_mismatches = [
+            path for path in material_paths if not media_path_under_root(path, expected_root)
+        ]
+        source_media_root_ok = bool(material_paths) and source_media_root_missing_path_count == 0 and not source_media_root_mismatches
+
+    return {
+        "video_material_count": len(videos),
+        "video_material_paths": material_paths,
+        "video_material_names": material_names,
+        "expected_source_media_root": expected_root,
+        "source_media_root_ok": source_media_root_ok,
+        "source_media_root_mismatches": source_media_root_mismatches,
+        "source_media_root_missing_path_count": source_media_root_missing_path_count,
+    }
+
+
 def summarize_tracks(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {
@@ -106,7 +163,13 @@ def file_record(path: Path, root: Path | None = None) -> dict[str, Any]:
     }
 
 
-def decrypt_candidate(jy_draftc: Path, path: Path, output_dir: Path, keep_decrypted: bool) -> dict[str, Any]:
+def decrypt_candidate(
+    jy_draftc: Path,
+    path: Path,
+    output_dir: Path,
+    keep_decrypted: bool,
+    expected_source_media_root: str = "",
+) -> dict[str, Any]:
     record = file_record(path)
     record.update(
         {
@@ -121,6 +184,13 @@ def decrypt_candidate(jy_draftc: Path, path: Path, output_dir: Path, keep_decryp
             "track_count": 0,
             "video_segments": 0,
             "text_segments": 0,
+            "video_material_count": 0,
+            "video_material_paths": [],
+            "video_material_names": [],
+            "expected_source_media_root": normalize_media_path(expected_source_media_root),
+            "source_media_root_ok": None if not expected_source_media_root else False,
+            "source_media_root_mismatches": [],
+            "source_media_root_missing_path_count": 0,
             "decrypted_path": "",
             "error": "",
         }
@@ -136,12 +206,18 @@ def decrypt_candidate(jy_draftc: Path, path: Path, output_dir: Path, keep_decryp
         data = json.loads(dec_path.read_text("utf-8"))
         record["json_ok"] = True
         record.update(summarize_tracks(data))
+        record.update(summarize_media(data, expected_source_media_root))
         blob = json_blob(data)
         markers = {marker: blob.count(marker) for marker in AUTOMATION_MARKERS}
         marker_count = sum(markers.values())
         record["automation_markers"] = markers
         record["automation_marker_count"] = marker_count
-        record["clean_like"] = bool(record["valid_draft_content"] and record["video_segments"] > 0 and marker_count == 0)
+        source_media_root_ok = True
+        if expected_source_media_root:
+            source_media_root_ok = bool(record.get("source_media_root_ok"))
+        record["clean_like"] = bool(
+            record["valid_draft_content"] and record["video_segments"] > 0 and marker_count == 0 and source_media_root_ok
+        )
         record["dirty_like"] = bool(record["valid_draft_content"] and marker_count > 0)
         if keep_decrypted:
             record["decrypted_path"] = str(dec_path)
@@ -198,7 +274,13 @@ def collect_active_targets(draft_dir: Path) -> list[Path]:
     return unique
 
 
-def active_target_record(jy_draftc: Path, path: Path, output_dir: Path, keep_decrypted: bool) -> dict[str, Any]:
+def active_target_record(
+    jy_draftc: Path,
+    path: Path,
+    output_dir: Path,
+    keep_decrypted: bool,
+    expected_source_media_root: str = "",
+) -> dict[str, Any]:
     if not path.exists():
         return {
             "path": str(path),
@@ -210,8 +292,15 @@ def active_target_record(jy_draftc: Path, path: Path, output_dir: Path, keep_dec
             "video_segments": 0,
             "text_segments": 0,
             "automation_marker_count": 0,
+            "video_material_count": 0,
+            "video_material_paths": [],
+            "video_material_names": [],
+            "expected_source_media_root": normalize_media_path(expected_source_media_root),
+            "source_media_root_ok": None if not expected_source_media_root else False,
+            "source_media_root_mismatches": [],
+            "source_media_root_missing_path_count": 0,
         }
-    record = decrypt_candidate(jy_draftc, path, output_dir, keep_decrypted)
+    record = decrypt_candidate(jy_draftc, path, output_dir, keep_decrypted, expected_source_media_root)
     record["exists"] = True
     return record
 
@@ -225,14 +314,17 @@ def select_baseline(
     keep_decrypted: bool,
     selection_mode: str,
     initial_cluster_seconds: int,
+    expected_source_media_root: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     warnings: list[str] = []
 
     if baseline_path is not None:
-        selected = decrypt_candidate(jy_draftc, baseline_path, output_dir, keep_decrypted)
+        selected = decrypt_candidate(jy_draftc, baseline_path, output_dir, keep_decrypted, expected_source_media_root)
         selected["selection_reason"] = "explicit_baseline_path"
         if not selected.get("clean_like"):
             warnings.append("explicit baseline is not clean_like; use only when intentionally restoring this exact file")
+        if expected_source_media_root and not selected.get("source_media_root_ok"):
+            warnings.append("explicit baseline source media paths do not match expected_source_media_root")
         return selected, {
             "strategy": "explicit_baseline_path",
             "confidence": "high" if selected.get("clean_like") else "low",
@@ -295,6 +387,7 @@ def select_baseline(
             keep_decrypted=keep_decrypted,
             selection_mode="initial-clean-cluster",
             initial_cluster_seconds=initial_cluster_seconds,
+            expected_source_media_root=expected_source_media_root,
         )
 
     if first_dirty is not None:
@@ -377,10 +470,17 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     backup_files = collect_backup_files(backup_root)
     all_backup_records = [file_record(path, backup_root) for path in backup_files]
     candidate_paths = [path for path in backup_files if path.suffix.lower() == ".bak"]
-    candidates = [decrypt_candidate(jy_draftc, path, output_dir, args.keep_decrypted) for path in candidate_paths]
+    expected_source_media_root = normalize_media_path(args.expected_source_media_root)
+    candidates = [
+        decrypt_candidate(jy_draftc, path, output_dir, args.keep_decrypted, expected_source_media_root)
+        for path in candidate_paths
+    ]
 
     target_paths = collect_active_targets(draft_dir)
-    active_targets = [active_target_record(jy_draftc, path, output_dir, args.keep_decrypted) for path in target_paths]
+    active_targets = [
+        active_target_record(jy_draftc, path, output_dir, args.keep_decrypted, expected_source_media_root)
+        for path in target_paths
+    ]
 
     selected, selection = select_baseline(
         candidates=candidates,
@@ -391,6 +491,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         keep_decrypted=args.keep_decrypted,
         selection_mode=args.selection_mode,
         initial_cluster_seconds=args.initial_cluster_seconds,
+        expected_source_media_root=expected_source_media_root,
     )
 
     quarantine_paths = collect_quarantine_backup_paths(
@@ -409,6 +510,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "backup_root": str(backup_root),
         "jy_draftc": str(jy_draftc),
         "output_dir": str(output_dir),
+        "expected_source_media_root": expected_source_media_root,
         "selected_candidate": selected,
         "selection": selection,
         "active_targets": active_targets,
@@ -438,6 +540,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--baseline-path", default="")
     parser.add_argument("--keep-decrypted", action="store_true")
+    parser.add_argument("--expected-source-media-root", default="")
     parser.add_argument(
         "--selection-mode",
         choices=("auto", "initial-clean-cluster", "latest-clean-before-dirty"),

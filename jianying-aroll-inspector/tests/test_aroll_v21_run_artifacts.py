@@ -35,6 +35,8 @@ class ArollV21RunArtifactTests(unittest.TestCase):
             for artifact in REQUIRED_ARTIFACTS:
                 self.assertTrue((run_dir / artifact).exists(), artifact)
             run_summary = json.loads((run_dir / "run_summary.json").read_text("utf-8"))
+            artifact_manifest = json.loads((run_dir / "artifact_manifest.json").read_text("utf-8"))
+            self.assertNotIn("aroll_true_transcript.md", artifact_manifest["artifact_files"])
             for key in (
                 "single_source_graph_ok",
                 "all_final_segments_have_word_ids",

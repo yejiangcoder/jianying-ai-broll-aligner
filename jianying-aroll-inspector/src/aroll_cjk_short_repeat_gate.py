@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from aroll_v21.quality.boundary_overlap import is_semantic_label_reuse_boundary
+
 
 MAX_OVERLAP_CHARS = 8
 MIN_FATAL_OVERLAP_CHARS = 2
@@ -206,6 +208,8 @@ def _detect_intra_text(text: str, row_index: int) -> list[dict[str, Any]]:
     for part_index, (left, right) in enumerate(zip(parts, parts[1:]), start=1):
         overlap_size, phrase = _best_suffix_prefix_overlap(left, right, min_chars=MIN_WARNING_OVERLAP_CHARS)
         if overlap_size:
+            if is_semantic_label_reuse_boundary(left, right, phrase):
+                continue
             severity = _overlap_severity(phrase, left, right)
             candidates.append(
                 _candidate(
@@ -280,6 +284,8 @@ def detect_cjk_short_repeats(display_subtitle_plan: list[dict[str, Any]] | None)
             continue
         overlap_size, phrase = _best_suffix_prefix_overlap(left, right, min_chars=MIN_WARNING_OVERLAP_CHARS)
         if overlap_size:
+            if is_semantic_label_reuse_boundary(left_text, right_text, phrase):
+                continue
             severity = _overlap_severity(phrase, left, right)
             candidates.append(
                 _candidate(

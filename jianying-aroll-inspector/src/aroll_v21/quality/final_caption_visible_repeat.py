@@ -7,6 +7,10 @@ from typing import Any
 from aroll_adjacent_modifier_semantic_redundancy_gate import detect_adjacent_modifier_semantic_redundancy
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CaptionRenderUnit
+from aroll_v21.quality.boundary_overlap import (
+    is_explanatory_term_reuse,
+    is_semantic_label_reuse_boundary,
+)
 from aroll_v21.quality.repeat_span_repair import longest_suffix_prefix_overlap, self_repair_aborted_phrase_candidate
 
 
@@ -16,12 +20,27 @@ NEAR_DUPLICATE_RATIO = 0.9
 DANGLING_ASPECT_PREFIXES = ("了", "着", "过")
 DANGLING_DE_EXCEPTIONS = ("的确", "的话")
 DANGLING_ASPECT_EXCEPTIONS = ("了解", "了不起", "过去", "过程", "过来", "过渡", "着陆")
+DANGLING_PRONOUN_MODAL_PRONOUNS = ("你", "他", "我", "咱", "人家", "自己")
+DANGLING_PRONOUN_MODAL_TAILS = ("只", "就", "还", "都", "也", "才", "会", "能", "敢", "要", "把", "给", "在", "被", "让")
 NEGATIVE_RESTART_PREFIX = "不"
 NEGATIVE_PREDICATE_MODAL_PREFIXES = ("可", "能", "会", "敢", "受", "被")
 PARTIAL_RESTART_MIN_CHARS = 2
 PARTIAL_RESTART_MAX_DROP_CHARS = 6
 PARTIAL_RESTART_MAX_COMPLETED_CHARS = 10
 PARTIAL_RESTART_LEFT_CONTEXT_CHARS = 5
+SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS = 3
+SHORT_FRAGMENT_RESTART_MAX_LEFT_CHARS = 8
+SHORT_FRAGMENT_RESTART_LOOKAHEAD = 3
+SHORT_FRAGMENT_RESTART_MIN_COVERAGE = 0.6
+WEAK_RESTART_PREFIXES = ("但其实", "其实", "就是", "然后", "但是", "所以", "因为", "就", "但")
+FRAGMENT_TAILS = ("全是", "就是", "是", "的", "在", "把", "给", "去", "就")
+INTERNAL_PREFIX_RESTART_MAX_PHRASE_CHARS = 10
+INTERNAL_PREFIX_RESTART_MAX_GAP_CHARS = 4
+INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS = 14
+INTERNAL_PREFIX_RESTART_LEAD_PREFIXES = ("", "就", "呃", "啊", "嗯")
+REPEATED_DISCOURSE_OPENERS = ("但凡", "如果", "假如", "要是", "所以", "因为", "但是", "然后", "其实", "就是")
+REPEATED_DISCOURSE_MIN_REMAINDER_CHARS = 3
+REPEATED_DISCOURSE_MAX_SOURCE_GAP_US = 500_000
 FINAL_VISIBLE_RECHECK_DECISIONS = [
     "drop_bad_fragment",
     "trim_repeated_prefix",
@@ -45,8 +64,10 @@ def build_final_caption_visible_repeat_gate(captions: list[CaptionRenderUnit]) -
     cross_caption_containment_candidates = _cross_caption_semantic_containment_candidates(ordered)
     restart_repeat_candidates = [
         *_restart_repeat_visible_candidates(ordered),
+        *_repeated_discourse_opener_candidates(ordered),
         *_negative_predicate_restart_candidates(ordered),
         *_partial_phrase_restart_candidates(ordered),
+        *_short_fragment_restart_candidates(ordered),
     ]
     visible_repeat_candidates = [
         *containment_candidates,
@@ -120,6 +141,8 @@ def _containment_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str,
             right_text = normalize_text(right.text)
             if not right_text:
                 continue
+            if is_explanatory_term_reuse(left_text, right_text) or is_explanatory_term_reuse(right_text, left_text):
+                continue
             if left_text == right_text or (len(left_text) >= 2 and left_text in right_text) or (len(right_text) >= 2 and right_text in left_text):
                 candidates.append(
                     _candidate(
@@ -142,12 +165,15 @@ def _prefix_suffix_candidates(captions: list[CaptionRenderUnit], excluded_pairs:
         right_chars = list(normalize_text(right.text))
         overlap = longest_suffix_prefix_overlap(left_chars, right_chars)
         if overlap >= PREFIX_SUFFIX_MIN_OVERLAP:
+            overlap_text = "".join(left_chars[-overlap:])
+            if is_semantic_label_reuse_boundary(left.text, right.text, overlap_text):
+                continue
             candidates.append(
                 _candidate(
                     "prefix_suffix_overlap",
                     left,
                     right,
-                    overlap_text="".join(left_chars[-overlap:]),
+                    overlap_text=overlap_text,
                     score=overlap,
                 )
             )
@@ -168,6 +194,8 @@ def _ngram_candidates(captions: list[CaptionRenderUnit], excluded_pairs: set[tup
             previous, previous_index = previous_row
             seen[ngram] = (caption, caption_index)
             if (previous.caption_id, caption.caption_id) in excluded_pairs:
+                continue
+            if is_explanatory_term_reuse(previous.text, caption.text) or is_explanatory_term_reuse(caption.text, previous.text):
                 continue
             if not _ngram_repeat_is_blocking(previous, caption, ngram, previous_index, caption_index):
                 continue
@@ -335,6 +363,19 @@ def _dangling_prefix_suffix_reason(text: str) -> str:
         return "dangling_de_prefix"
     if text.startswith(DANGLING_ASPECT_PREFIXES) and not text.startswith(DANGLING_ASPECT_EXCEPTIONS):
         return "dangling_aspect_suffix_caption"
+    if _dangling_pronoun_modal_suffix(text):
+        return "dangling_pronoun_modal_suffix"
+    return ""
+
+
+def _dangling_pronoun_modal_suffix(text: str) -> str:
+    if len(text) < 5:
+        return ""
+    for pronoun in DANGLING_PRONOUN_MODAL_PRONOUNS:
+        for tail in DANGLING_PRONOUN_MODAL_TAILS:
+            suffix = f"{pronoun}{tail}"
+            if text.endswith(suffix) and len(text) > len(suffix) + 2:
+                return suffix
     return ""
 
 
@@ -396,6 +437,8 @@ def _cross_caption_semantic_containment_candidates(captions: list[CaptionRenderU
             if len(window) < 2:
                 continue
             combined = normalize_text("".join(row.text for row in window))
+            if is_explanatory_term_reuse(left_text, combined) or is_explanatory_term_reuse(combined, left_text):
+                continue
             if not combined:
                 continue
             overlap_text = left_text if left_text in combined else ""
@@ -451,6 +494,25 @@ def _restart_repeat_visible_candidates(captions: list[CaptionRenderUnit]) -> lis
                 }
             )
             candidates.append(candidate)
+        internal_prefix_restart = _internal_prefix_restart_repeat(left_text)
+        if internal_prefix_restart is not None:
+            candidate = _candidate(
+                "internal_prefix_restart_repeat_visible",
+                caption,
+                caption,
+                overlap_text=str(internal_prefix_restart.get("overlap_text") or ""),
+                score=float(internal_prefix_restart.get("score") or 1.0),
+            )
+            candidate.update(
+                {
+                    "type": "internal_prefix_restart_repeat_visible",
+                    "severity": "high",
+                    "window_caption_ids": [caption.caption_id],
+                    "window_text": caption.text,
+                    **internal_prefix_restart,
+                }
+            )
+            candidates.append(candidate)
         if len(left_text) < PREFIX_SUFFIX_MIN_OVERLAP + 1:
             continue
         for window_size in (1, 2):
@@ -458,6 +520,8 @@ def _restart_repeat_visible_candidates(captions: list[CaptionRenderUnit]) -> lis
             if not window:
                 continue
             combined = normalize_text("".join(row.text for row in window))
+            if is_explanatory_term_reuse(left_text, combined) or is_explanatory_term_reuse(combined, left_text):
+                continue
             overlap_text = ""
             if left_text in combined and not combined.startswith(left_text):
                 overlap_text = left_text
@@ -488,6 +552,156 @@ def _restart_repeat_visible_candidates(captions: list[CaptionRenderUnit]) -> lis
             )
             candidates.append(candidate)
     return candidates
+
+
+def _repeated_discourse_opener_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for left, right in zip(captions, captions[1:]):
+        left_text = normalize_text(left.text)
+        right_text = normalize_text(right.text)
+        if not left_text or not right_text:
+            continue
+        opener = _shared_discourse_opener(left_text, right_text)
+        if not opener:
+            continue
+        if len(left_text) - len(opener) < REPEATED_DISCOURSE_MIN_REMAINDER_CHARS:
+            continue
+        if len(right_text) - len(opener) < REPEATED_DISCOURSE_MIN_REMAINDER_CHARS:
+            continue
+        if not _caption_source_gap_within(left, right, REPEATED_DISCOURSE_MAX_SOURCE_GAP_US):
+            continue
+        candidate = _candidate(
+            "adjacent_repeated_discourse_opener_visible",
+            right,
+            left,
+            overlap_text=opener,
+            score=round(len(opener) / max(1, min(len(left_text), len(right_text))), 6),
+        )
+        candidate.update(
+            {
+                "type": "adjacent_repeated_discourse_opener_visible",
+                "severity": "high",
+                "pattern": "repeated_discourse_opener",
+                "drop_text": opener,
+                "window_caption_ids": [left.caption_id, right.caption_id],
+                "window_text": f"{left.text}{right.text}",
+            }
+        )
+        candidates.append(candidate)
+    return candidates
+
+
+def _shared_discourse_opener(left_text: str, right_text: str) -> str:
+    for opener in REPEATED_DISCOURSE_OPENERS:
+        if left_text.startswith(opener) and right_text.startswith(opener):
+            return opener
+    return ""
+
+
+def _caption_source_gap_within(left: CaptionRenderUnit, right: CaptionRenderUnit, max_gap_us: int) -> bool:
+    left_end = int(left.spoken_source_end_us or 0)
+    right_start = int(right.spoken_source_start_us or 0)
+    if left_end <= 0 or right_start <= 0:
+        target_gap_us = int(right.target_start_us) - int(left.target_end_us)
+        return -80_000 <= target_gap_us <= max_gap_us
+    return -80_000 <= right_start - left_end <= max_gap_us
+
+
+def _short_fragment_restart_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    emitted: set[tuple[str, str]] = set()
+    for index, caption in enumerate(captions):
+        left_text = normalize_text(caption.text)
+        if len(left_text) < SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS:
+            continue
+        for window_size in range(1, SHORT_FRAGMENT_RESTART_LOOKAHEAD + 1):
+            window = captions[index + 1 : index + 1 + window_size]
+            if not window:
+                continue
+            combined = normalize_text("".join(row.text for row in window))
+            if is_explanatory_term_reuse(left_text, combined) or is_explanatory_term_reuse(combined, left_text):
+                continue
+            row = _short_fragment_restart_match(left_text, combined)
+            if row is None:
+                continue
+            overlap_text = str(row.get("overlap_text") or "")
+            key = (caption.caption_id, overlap_text)
+            if key in emitted:
+                continue
+            emitted.add(key)
+            candidate = _candidate(
+                "short_fragment_restart_visible",
+                caption,
+                window[-1],
+                overlap_text=overlap_text,
+                score=float(row.get("score") or 1.0),
+            )
+            candidate.update(
+                {
+                    "type": "short_fragment_restart_visible",
+                    "severity": "high",
+                    "window_caption_ids": [item.caption_id for item in window],
+                    "window_text": "".join(item.text for item in window),
+                    **row,
+                }
+            )
+            candidates.append(candidate)
+            break
+    return candidates
+
+
+def _short_fragment_restart_match(left_text: str, combined_right_text: str) -> dict[str, Any] | None:
+    no_match: dict[str, Any] | None = None
+    if not left_text or not combined_right_text:
+        return no_match
+    if left_text == combined_right_text:
+        return no_match
+
+    overlap_row = _longest_common_substring_row(left_text, combined_right_text)
+    overlap_text = str(overlap_row.get("text") or "")
+    if len(overlap_text) < SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS or not _plain_cjk(overlap_text):
+        return no_match
+
+    left_start = int(overlap_row.get("left_start") or 0)
+    right_start = int(overlap_row.get("right_start") or 0)
+    touches_left_boundary = left_start == 0 or left_start + len(overlap_text) == len(left_text)
+    touches_right_boundary = right_start == 0 or right_start + len(overlap_text) == len(combined_right_text)
+    coverage = len(overlap_text) / max(1, len(left_text))
+    left_is_short = len(left_text) <= SHORT_FRAGMENT_RESTART_MAX_LEFT_CHARS
+    weak_prefix = _weak_restart_prefix(left_text)
+    right_weak_prefix = _weak_restart_prefix(combined_right_text)
+    tail_fragment = _fragment_tail(left_text)
+
+    whole_short_fragment_repeated = left_is_short and left_text in combined_right_text and not combined_right_text.startswith(left_text)
+    short_high_coverage_restart = (
+        left_is_short
+        and coverage >= SHORT_FRAGMENT_RESTART_MIN_COVERAGE
+        and (touches_left_boundary or touches_right_boundary)
+        and bool(weak_prefix or tail_fragment or _contains_copula_restart(left_text))
+    )
+    weak_prefix_restart = (
+        bool(weak_prefix)
+        and weak_prefix == right_weak_prefix
+        and len(weak_prefix) >= SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS
+        and left_text != combined_right_text
+    )
+    tail_overlap_restart = left_is_short and bool(tail_fragment) and coverage >= SHORT_FRAGMENT_RESTART_MIN_COVERAGE and (
+        touches_left_boundary or touches_right_boundary or len(overlap_text) >= 4
+    )
+    if not (whole_short_fragment_repeated or short_high_coverage_restart or weak_prefix_restart or tail_overlap_restart):
+        return no_match
+
+    return {
+        "pattern": "short_fragment_restart",
+        "overlap_text": overlap_text,
+        "drop_text": left_text,
+        "left_start": left_start,
+        "right_start": right_start,
+        "coverage": round(coverage, 6),
+        "score": round(coverage, 6),
+        "weak_restart_prefix": weak_prefix,
+        "fragment_tail": tail_fragment,
+    }
 
 
 def _negative_predicate_restart_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
@@ -696,6 +910,62 @@ def _internal_restart_repeat(text: str) -> dict[str, Any] | None:
     return no_restart
 
 
+def _internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
+    if len(text) < SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS * 2 + 1:
+        no_restart: dict[str, Any] | None = None
+        return no_restart
+    max_phrase_len = min(INTERNAL_PREFIX_RESTART_MAX_PHRASE_CHARS, len(text) // 2)
+    best: dict[str, Any] | None = None
+    for phrase_len in range(SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS, max_phrase_len + 1):
+        for first_start in range(0, max(0, len(text) - phrase_len * 2) + 1):
+            phrase = text[first_start : first_start + phrase_len]
+            if not _plain_cjk(phrase):
+                continue
+            lead_prefix = text[:first_start]
+            if lead_prefix not in INTERNAL_PREFIX_RESTART_LEAD_PREFIXES:
+                continue
+            second_start = text.find(phrase, first_start + phrase_len)
+            if second_start < 0:
+                continue
+            gap = text[first_start + phrase_len : second_start]
+            if len(gap) > INTERNAL_PREFIX_RESTART_MAX_GAP_CHARS:
+                continue
+            drop_text = text[:second_start]
+            if not drop_text or len(drop_text) > INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS:
+                continue
+            if best is None or phrase_len > int(best.get("phrase_chars") or 0):
+                best = {
+                    "pattern": "internal_prefix_restart",
+                    "restart_phrase": phrase,
+                    "overlap_text": text[first_start : second_start + phrase_len],
+                    "drop_text": drop_text,
+                    "first_start": first_start,
+                    "second_start": second_start,
+                    "gap_text": gap,
+                    "phrase_chars": phrase_len,
+                    "score": round(phrase_len / max(1, len(drop_text)), 6),
+                }
+    return best
+
+
+def _weak_restart_prefix(text: str) -> str:
+    for prefix in WEAK_RESTART_PREFIXES:
+        if text.startswith(prefix):
+            return prefix
+    return ""
+
+
+def _fragment_tail(text: str) -> str:
+    for tail in FRAGMENT_TAILS:
+        if text.endswith(tail):
+            return tail
+    return ""
+
+
+def _contains_copula_restart(text: str) -> bool:
+    return text.count("是") >= 2 or text.startswith("就是")
+
+
 def _longest_common_substring(left: str, right: str) -> str:
     if not left or not right:
         return ""
@@ -708,6 +978,24 @@ def _longest_common_substring(left: str, right: str) -> str:
             if offset > len(best):
                 best = left[left_index : left_index + offset]
     return best
+
+
+def _longest_common_substring_row(left: str, right: str) -> dict[str, Any]:
+    if not left or not right:
+        return {"text": "", "left_start": 0, "right_start": 0}
+    best = ""
+    best_left = 0
+    best_right = 0
+    for left_index in range(len(left)):
+        for right_index in range(len(right)):
+            offset = 0
+            while left_index + offset < len(left) and right_index + offset < len(right) and left[left_index + offset] == right[right_index + offset]:
+                offset += 1
+            if offset > len(best):
+                best = left[left_index : left_index + offset]
+                best_left = left_index
+                best_right = right_index
+    return {"text": best, "left_start": best_left, "right_start": best_right}
 
 
 def _plain_cjk(text: str) -> bool:

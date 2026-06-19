@@ -638,27 +638,19 @@ class RealDraftWriteback:
 
     def _gapless_caption_video_projection_plan(self, run_report: RunReport) -> dict[str, Any]:
         final_by_id = {segment.segment_id: segment for segment in run_report.final_timeline}
-        word_by_id = {
-            str(word.word_id): word
-            for word in (run_report.source_graph.words if run_report.source_graph is not None else [])
-        }
-        units: list[FinalTimelineSegment] = []
+        words = sorted(
+            list(run_report.source_graph.words if run_report.source_graph is not None else []),
+            key=lambda word: (int(word.source_start_us), int(word.source_end_us), str(word.word_id)),
+        )
+        captions_by_final_id: dict[str, list[CaptionRenderUnit]] = {}
         caption_target_ranges: dict[str, dict[str, int]] = {}
         missing_caption_segment_ids: list[str] = []
-        target_cursor = 0
         for caption in sorted(run_report.captions, key=lambda row: (int(row.target_start_us), int(row.target_end_us), str(row.caption_id))):
             final_id = str(caption.containing_video_segment_id or (caption.timeline_segment_ids[0] if caption.timeline_segment_ids else ""))
             final_segment = final_by_id.get(final_id)
             if final_segment is None:
                 missing_caption_segment_ids.append(str(caption.caption_id))
                 continue
-            spoken_start, spoken_end = self._caption_spoken_source_span(caption, word_by_id)
-            if spoken_start is None or spoken_end is None or spoken_end <= spoken_start:
-                raise WritebackError(
-                    "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
-                    "caption cannot be projected to video because its spoken source span is missing",
-                    {"caption_id": caption.caption_id, "timeline_segment_ids": list(caption.timeline_segment_ids)},
-                )
             target_start = int(caption.target_start_us)
             target_end = int(caption.target_end_us)
             if target_end <= target_start:
@@ -667,10 +659,37 @@ class RealDraftWriteback:
                     "caption cannot be projected to video because its target span is empty",
                     {"caption_id": caption.caption_id, "target_start_us": target_start, "target_end_us": target_end},
                 )
-            source_groups = self._caption_video_source_groups(caption, list(word_by_id.values()), source_start=spoken_start, source_end=spoken_end)
-            caption_range_start: int | None = None
-            caption_range_end: int | None = None
-            for group_index, group in enumerate(source_groups, start=1):
+            captions_by_final_id.setdefault(final_id, []).append(caption)
+        if missing_caption_segment_ids:
+            raise WritebackError(
+                "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
+                "one or more captions do not have a containing final video segment",
+                {"caption_ids": missing_caption_segment_ids[:20], "missing_caption_count": len(missing_caption_segment_ids)},
+            )
+        if not run_report.final_timeline and run_report.captions:
+            raise WritebackError(
+                "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
+                "no final timeline video units were available for caption writeback",
+                {"final_timeline_segment_count": len(run_report.final_timeline), "caption_count": len(run_report.captions)},
+            )
+
+        units: list[FinalTimelineSegment] = []
+        target_cursor = 0
+        for final_segment in sorted(
+            run_report.final_timeline,
+            key=lambda row: (int(row.target_start_us), int(row.target_end_us), str(row.segment_id)),
+        ):
+            segment_captions = sorted(
+                captions_by_final_id.get(str(final_segment.segment_id), []),
+                key=lambda row: (int(row.target_start_us), int(row.target_end_us), str(row.caption_id)),
+            )
+            groups = self._final_segment_video_projection_groups(final_segment, segment_captions, words)
+            if not groups:
+                continue
+            segment_original_target_start = int(groups[0]["original_target_start_us"])
+            segment_target_delta = int(target_cursor) - segment_original_target_start
+            projected_groups: list[dict[str, Any]] = []
+            for group_index, group in enumerate(groups, start=1):
                 group_source_start = int(group["source_start_us"])
                 group_source_end = int(group["source_end_us"])
                 group_duration = max(0, group_source_end - group_source_start)
@@ -679,20 +698,24 @@ class RealDraftWriteback:
                 group_target_start = target_cursor
                 group_target_end = group_target_start + group_duration
                 target_cursor = group_target_end
-                if caption_range_start is None:
-                    caption_range_start = group_target_start
-                caption_range_end = group_target_end
-                debug_hints = dict(final_segment.debug_hints)
-                debug_hints.update(
+                projected_groups.append(
                     {
-                        "safe_handle_policy_enabled": False,
-                        "writeback_caption_span_projection": True,
-                        "writeback_caption_id": caption.caption_id,
-                        "writeback_caption_split_index": group_index,
-                        "writeback_caption_split_count": len(source_groups),
-                        "writeback_original_final_segment_id": final_segment.segment_id,
+                        **group,
+                        "projected_target_start_us": group_target_start,
+                        "projected_target_end_us": group_target_end,
                     }
                 )
+                debug_hints = dict(final_segment.debug_hints)
+                debug_hints["safe_handle_policy_enabled"] = False
+                if bool(group.get("source_projection_required")):
+                    debug_hints.update(
+                        {
+                            "writeback_source_projection": True,
+                            "writeback_projection_split_index": group_index,
+                            "writeback_projection_split_count": len(groups),
+                            "writeback_original_final_segment_id": final_segment.segment_id,
+                        }
+                    )
                 units.append(
                     FinalTimelineSegment(
                         segment_id=final_segment.segment_id,
@@ -703,7 +726,7 @@ class RealDraftWriteback:
                         target_start_us=group_target_start,
                         target_end_us=group_target_end,
                         word_ids=list(group["word_ids"]),
-                        text=caption.text,
+                        text=final_segment.text,
                         decision_ids=list(final_segment.decision_ids),
                         spoken_source_start_us=group_source_start,
                         spoken_source_end_us=group_source_end,
@@ -714,27 +737,11 @@ class RealDraftWriteback:
                         debug_hints=debug_hints,
                     )
                 )
-            if caption_range_start is None or caption_range_end is None or caption_range_end <= caption_range_start:
-                raise WritebackError(
-                    "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
-                    "caption cannot be projected to a non-empty gapless video interval",
-                    {"caption_id": caption.caption_id, "timeline_segment_ids": list(caption.timeline_segment_ids)},
-                )
-            caption_target_ranges[str(caption.caption_id)] = {
-                "target_start_us": int(caption_range_start),
-                "target_end_us": int(caption_range_end),
-            }
-        if missing_caption_segment_ids:
-            raise WritebackError(
-                "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
-                "one or more captions do not have a containing final video segment",
-                {"caption_ids": missing_caption_segment_ids[:20], "missing_caption_count": len(missing_caption_segment_ids)},
-            )
-        if not units and run_report.final_timeline:
-            raise WritebackError(
-                "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
-                "no caption-backed video projection units were available",
-                {"final_timeline_segment_count": len(run_report.final_timeline), "caption_count": len(run_report.captions)},
+            self._apply_caption_ranges_for_projected_segment(
+                caption_target_ranges,
+                segment_captions,
+                projected_groups,
+                default_delta_us=segment_target_delta,
             )
         return {
             "video_units": units,
@@ -779,6 +786,135 @@ class RealDraftWriteback:
                     "text_segment_count": len(text_segments),
                 },
             )
+
+    def _final_segment_video_projection_groups(
+        self,
+        final_segment: FinalTimelineSegment,
+        segment_captions: list[CaptionRenderUnit],
+        words: list[Any],
+    ) -> list[dict[str, Any]]:
+        source_start = int(final_segment.source_start_us)
+        source_end = int(final_segment.source_end_us)
+        target_start = int(final_segment.target_start_us)
+        target_end = int(final_segment.target_end_us)
+        if source_end <= source_start or target_end <= target_start:
+            return []
+        if not segment_captions and final_segment.word_ids:
+            return []
+        captioned_word_ids = {str(word_id) for caption in segment_captions for word_id in caption.word_ids}
+        spoken_start = int(final_segment.spoken_source_start_us) if final_segment.spoken_source_start_us is not None else source_start
+        spoken_end = int(final_segment.spoken_source_end_us) if final_segment.spoken_source_end_us is not None else source_end
+        uncaptioned_speech_words = [
+            word
+            for word in words
+            if str(word.word_id) not in captioned_word_ids
+            and self._ranges_overlap(int(word.source_start_us), int(word.source_end_us), source_start, source_end)
+            and self._ranges_overlap(int(word.source_start_us), int(word.source_end_us), spoken_start, spoken_end)
+        ]
+        if not uncaptioned_speech_words:
+            return [
+                {
+                    "source_start_us": source_start,
+                    "source_end_us": source_end,
+                    "original_target_start_us": target_start,
+                    "original_target_end_us": target_end,
+                    "word_ids": list(final_segment.word_ids),
+                    "caption_ids": [str(caption.caption_id) for caption in segment_captions],
+                    "source_projection_required": False,
+                }
+            ]
+        kept_words = [
+            word
+            for word in words
+            if str(word.word_id) in captioned_word_ids
+            and self._ranges_overlap(int(word.source_start_us), int(word.source_end_us), source_start, source_end)
+        ]
+        if not kept_words:
+            return [
+                {
+                    "source_start_us": source_start,
+                    "source_end_us": source_end,
+                    "original_target_start_us": target_start,
+                    "original_target_end_us": target_end,
+                    "word_ids": list(final_segment.word_ids),
+                    "caption_ids": [str(caption.caption_id) for caption in segment_captions],
+                    "source_projection_required": False,
+                }
+            ]
+        groups: list[list[Any]] = [[kept_words[0]]]
+        for previous, current in zip(kept_words, kept_words[1:]):
+            gap_start = int(previous.source_end_us)
+            gap_end = int(current.source_start_us)
+            split_for_uncaptioned_speech = any(
+                self._ranges_overlap(int(word.source_start_us), int(word.source_end_us), gap_start, gap_end)
+                for word in uncaptioned_speech_words
+            )
+            if split_for_uncaptioned_speech:
+                groups.append([current])
+            else:
+                groups[-1].append(current)
+        projection_groups: list[dict[str, Any]] = []
+        for group in groups:
+            caption_ids = self._caption_ids_for_word_group(group, segment_captions)
+            group_captions = [caption for caption in segment_captions if str(caption.caption_id) in set(caption_ids)]
+            projection_groups.append(
+                {
+                    "source_start_us": min(int(word.source_start_us) for word in group),
+                    "source_end_us": max(int(word.source_end_us) for word in group),
+                    "original_target_start_us": min((int(caption.target_start_us) for caption in group_captions), default=target_start),
+                    "original_target_end_us": max((int(caption.target_end_us) for caption in group_captions), default=target_end),
+                    "word_ids": [str(word.word_id) for word in group],
+                    "caption_ids": caption_ids,
+                    "source_projection_required": True,
+                }
+            )
+        return projection_groups
+
+    def _caption_ids_for_word_group(self, words: list[Any], captions: list[CaptionRenderUnit]) -> list[str]:
+        group_word_ids = {str(word.word_id) for word in words}
+        caption_ids: list[str] = []
+        for caption in captions:
+            if group_word_ids.intersection(str(word_id) for word_id in caption.word_ids):
+                caption_ids.append(str(caption.caption_id))
+        return caption_ids
+
+    def _apply_caption_ranges_for_projected_segment(
+        self,
+        caption_target_ranges: dict[str, dict[str, int]],
+        captions: list[CaptionRenderUnit],
+        projected_groups: list[dict[str, Any]],
+        *,
+        default_delta_us: int,
+    ) -> None:
+        source_projected = any(bool(group.get("source_projection_required")) for group in projected_groups)
+        groups_by_caption: dict[str, list[dict[str, Any]]] = {}
+        for group in projected_groups:
+            for caption_id in group.get("caption_ids") or []:
+                groups_by_caption.setdefault(str(caption_id), []).append(group)
+        for caption in captions:
+            caption_id = str(caption.caption_id)
+            caption_groups = groups_by_caption.get(caption_id) or []
+            if source_projected and len(caption_groups) > 1:
+                start = min(int(group["projected_target_start_us"]) for group in caption_groups)
+                end = max(int(group["projected_target_end_us"]) for group in caption_groups)
+            elif source_projected and len(caption_groups) == 1:
+                group = caption_groups[0]
+                group_delta = int(group["projected_target_start_us"]) - int(group["original_target_start_us"])
+                start = int(caption.target_start_us) + group_delta
+                end = int(caption.target_end_us) + group_delta
+            else:
+                start = int(caption.target_start_us) + int(default_delta_us)
+                end = int(caption.target_end_us) + int(default_delta_us)
+            if end <= start:
+                raise WritebackError(
+                    "V21_WRITEBACK_CAPTION_SOURCE_SPAN_MISSING",
+                    "caption projected target range is empty",
+                    {"caption_id": caption.caption_id, "target_start_us": start, "target_end_us": end},
+                )
+            caption_target_ranges[caption_id] = {
+                "target_start_us": start,
+                "target_end_us": end,
+            }
 
     def _caption_spoken_source_span(
         self,
@@ -1384,6 +1520,8 @@ class RealDraftWriteback:
                 )
                 if split_start <= start and end <= split_end:
                     return True
+        if self._video_rows_covering_target_range(video_segments, start, end):
+            return True
         return False
 
     def _actual_final_timeline_from_video_rows(
@@ -1450,6 +1588,8 @@ class RealDraftWriteback:
                 for segment in actual_timeline
                 if str((segment.debug_hints or {}).get("writeback_caption_id") or "") == caption_id
             ]
+            if not split_segments:
+                split_segments = self._timeline_segments_covering_target_range(actual_timeline, start, end)
             if not split_segments:
                 continue
             split_start = min(int(segment.target_start_us) for segment in split_segments)
@@ -1548,36 +1688,96 @@ class RealDraftWriteback:
                 if str((segment.debug_hints or {}).get("writeback_caption_id") or "") == caption_id
             ]
             if split_segments:
-                target_start = min(int(segment.target_start_us) for segment in split_segments)
-                target_end = max(int(segment.target_end_us) for segment in split_segments)
-                if target_start <= start and end <= target_end:
-                    word_ids: list[str] = []
-                    for segment in split_segments:
-                        for word_id in segment.word_ids:
-                            if str(word_id) not in word_ids:
-                                word_ids.append(str(word_id))
-                    source_start = min(int(segment.source_start_us) for segment in split_segments)
-                    source_end = max(int(segment.source_end_us) for segment in split_segments)
-                    return FinalTimelineSegment(
-                        segment_id=f"actual_caption_container_{caption_id}",
-                        source_material_id=split_segments[0].source_material_id,
-                        source_segment_id=split_segments[0].source_segment_id,
-                        source_start_us=source_start,
-                        source_end_us=source_end,
-                        target_start_us=start,
-                        target_end_us=end,
-                        word_ids=word_ids,
-                        text=str(text_row.get("text") or ""),
-                        decision_ids=[],
-                        spoken_source_start_us=source_start,
-                        spoken_source_end_us=source_end,
-                        clip_source_start_us=source_start,
-                        clip_source_end_us=source_end,
-                        lead_handle_us=0,
-                        tail_handle_us=0,
-                        debug_hints={"writeback_caption_id": caption_id, "synthetic_split_caption_container": True},
-                    )
+                synthetic = self._synthetic_caption_container_from_segments(
+                    split_segments,
+                    caption_id=caption_id,
+                    text=str(text_row.get("text") or ""),
+                    target_start_us=start,
+                    target_end_us=end,
+                )
+                if synthetic is not None:
+                    return synthetic
+        split_segments = self._timeline_segments_covering_target_range(actual_timeline, start, end)
+        if split_segments:
+            return self._synthetic_caption_container_from_segments(
+                split_segments,
+                caption_id=caption_id,
+                text=str(text_row.get("text") or ""),
+                target_start_us=start,
+                target_end_us=end,
+            )
         return None
+
+    def _timeline_segments_covering_target_range(
+        self,
+        timeline: list[FinalTimelineSegment],
+        start: int,
+        end: int,
+    ) -> list[FinalTimelineSegment]:
+        if end <= start:
+            return []
+        overlapping = [
+            segment
+            for segment in timeline
+            if self._ranges_overlap(int(segment.target_start_us), int(segment.target_end_us), start, end)
+        ]
+        ordered = sorted(overlapping, key=lambda segment: (int(segment.target_start_us), int(segment.target_end_us), str(segment.segment_id)))
+        cursor = start
+        covering: list[FinalTimelineSegment] = []
+        for segment in ordered:
+            segment_start = int(segment.target_start_us)
+            segment_end = int(segment.target_end_us)
+            if segment_end <= cursor:
+                continue
+            if segment_start > cursor:
+                return []
+            covering.append(segment)
+            cursor = max(cursor, segment_end)
+            if cursor >= end:
+                return covering
+        return []
+
+    def _synthetic_caption_container_from_segments(
+        self,
+        segments: list[FinalTimelineSegment],
+        *,
+        caption_id: str,
+        text: str,
+        target_start_us: int,
+        target_end_us: int,
+    ) -> FinalTimelineSegment | None:
+        if not segments:
+            return None
+        segment_start = min(int(segment.target_start_us) for segment in segments)
+        segment_end = max(int(segment.target_end_us) for segment in segments)
+        if not (segment_start <= int(target_start_us) and int(target_end_us) <= segment_end):
+            return None
+        word_ids: list[str] = []
+        for segment in segments:
+            for word_id in segment.word_ids:
+                if str(word_id) not in word_ids:
+                    word_ids.append(str(word_id))
+        source_start = min(int(segment.source_start_us) for segment in segments)
+        source_end = max(int(segment.source_end_us) for segment in segments)
+        return FinalTimelineSegment(
+            segment_id=f"actual_caption_container_{caption_id or 'unbound'}",
+            source_material_id=segments[0].source_material_id,
+            source_segment_id=segments[0].source_segment_id,
+            source_start_us=source_start,
+            source_end_us=source_end,
+            target_start_us=int(target_start_us),
+            target_end_us=int(target_end_us),
+            word_ids=word_ids,
+            text=text,
+            decision_ids=[],
+            spoken_source_start_us=source_start,
+            spoken_source_end_us=source_end,
+            clip_source_start_us=source_start,
+            clip_source_end_us=source_end,
+            lead_handle_us=0,
+            tail_handle_us=0,
+            debug_hints={"writeback_caption_id": caption_id, "synthetic_split_caption_container": True},
+        )
 
     def _actual_audio_coverage_report(
         self,
@@ -1729,6 +1929,7 @@ class RealDraftWriteback:
         ]
         canonical_rows_by_caption = self._video_rows_by_caption_id(canonical_video_segments)
         original_rows_by_caption = self._video_rows_by_caption_id(actual_video_segments)
+        original_rows_by_timeline_segment = self._video_rows_by_timeline_segment_id(actual_video_segments)
         caption_by_id = {str(caption.caption_id): caption for caption in run_report.captions}
 
         caption_video_drift_rows: list[dict[str, Any]] = []
@@ -1739,7 +1940,11 @@ class RealDraftWriteback:
             caption_id = str(row.get("caption_id") or "")
             caption_start = int(row.get("target_start_us") or 0)
             caption_end = int(row.get("target_end_us") or 0)
-            canonical_group = canonical_rows_by_caption.get(caption_id) or []
+            canonical_group = canonical_rows_by_caption.get(caption_id) or self._video_rows_covering_target_range(
+                canonical_video_segments,
+                caption_start,
+                caption_end,
+            )
             if canonical_group:
                 group_start = min(self._timerange_start(segment.get("target_timerange")) for segment in canonical_group)
                 group_end = max(
@@ -1749,7 +1954,10 @@ class RealDraftWriteback:
             else:
                 group_start = 0
                 group_end = 0
-            drift_us = max(abs(caption_start - group_start), abs(caption_end - group_end)) if canonical_group else max(caption_end - caption_start, 0)
+            caption_covered_by_video = bool(canonical_group) and group_start <= caption_start and caption_end <= group_end
+            drift_us = 0 if caption_covered_by_video else (
+                max(abs(caption_start - group_start), abs(caption_end - group_end)) if canonical_group else max(caption_end - caption_start, 0)
+            )
             if drift_us:
                 caption_video_drift_rows.append(
                     {
@@ -1761,7 +1969,7 @@ class RealDraftWriteback:
                         "drift_us": drift_us,
                     }
                 )
-            if not canonical_group or caption_start != group_start or caption_end != group_end:
+            if not caption_covered_by_video:
                 split_caption_mismatch_rows.append(
                     {
                         "caption_id": caption_id,
@@ -1773,12 +1981,26 @@ class RealDraftWriteback:
                     }
                 )
 
+            planned_caption = caption_by_id.get(caption_id)
             original_group = original_rows_by_caption.get(caption_id) or []
+            if not original_group and planned_caption is not None:
+                for timeline_id in [planned_caption.containing_video_segment_id, *planned_caption.timeline_segment_ids]:
+                    timeline_key = str(timeline_id or "")
+                    if not timeline_key:
+                        continue
+                    original_group = original_rows_by_timeline_segment.get(timeline_key) or []
+                    if original_group:
+                        break
+            if not original_group:
+                original_group = self._video_rows_overlapping_target_range(
+                    actual_video_segments,
+                    caption_start,
+                    caption_end,
+                )
             split_gap = self._caption_split_gap_row(row, original_group)
             if split_gap is not None:
                 split_gap_rows.append(split_gap)
 
-            planned_caption = caption_by_id.get(caption_id)
             expected_word_ids = {str(word_id) for word_id in (planned_caption.word_ids if planned_caption is not None else [])}
             covered_word_ids = {
                 str(word_id)
@@ -1863,6 +2085,68 @@ class RealDraftWriteback:
                 continue
             rows_by_caption.setdefault(caption_id, []).append(segment)
         return rows_by_caption
+
+    def _video_rows_by_timeline_segment_id(self, video_segments: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        rows_by_timeline: dict[str, list[dict[str, Any]]] = {}
+        for segment in video_segments:
+            coverage = segment.get("_v21_audio_coverage") if isinstance(segment.get("_v21_audio_coverage"), dict) else {}
+            timeline_segment_id = str(coverage.get("timeline_segment_id") or "")
+            if not timeline_segment_id:
+                continue
+            rows_by_timeline.setdefault(timeline_segment_id, []).append(segment)
+        return rows_by_timeline
+
+    def _video_rows_covering_target_range(
+        self,
+        video_segments: list[dict[str, Any]],
+        caption_start: int,
+        caption_end: int,
+    ) -> list[dict[str, Any]]:
+        if caption_end <= caption_start:
+            return []
+        overlapping = self._video_rows_overlapping_target_range(video_segments, caption_start, caption_end)
+        if not overlapping:
+            return []
+        ordered = sorted(
+            overlapping,
+            key=lambda segment: (
+                self._timerange_start(segment.get("target_timerange")),
+                self._timerange_start(segment.get("target_timerange")) + self._timerange_duration(segment.get("target_timerange")),
+            ),
+        )
+        cursor = caption_start
+        covering: list[dict[str, Any]] = []
+        for segment in ordered:
+            segment_start = self._timerange_start(segment.get("target_timerange"))
+            segment_end = segment_start + self._timerange_duration(segment.get("target_timerange"))
+            if segment_end <= cursor:
+                continue
+            if segment_start > cursor:
+                return []
+            covering.append(segment)
+            cursor = max(cursor, segment_end)
+            if cursor >= caption_end:
+                return covering
+        return []
+
+    def _video_rows_overlapping_target_range(
+        self,
+        video_segments: list[dict[str, Any]],
+        caption_start: int,
+        caption_end: int,
+    ) -> list[dict[str, Any]]:
+        if caption_end <= caption_start:
+            return []
+        return [
+            segment
+            for segment in video_segments
+            if self._ranges_overlap(
+                self._timerange_start(segment.get("target_timerange")),
+                self._timerange_start(segment.get("target_timerange")) + self._timerange_duration(segment.get("target_timerange")),
+                caption_start,
+                caption_end,
+            )
+        ]
 
     def _caption_split_gap_row(
         self,
