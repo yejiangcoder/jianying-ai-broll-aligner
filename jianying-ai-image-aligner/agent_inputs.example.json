@@ -1,8 +1,8 @@
 {
-  "draft_dir": "<path-to-jianying-draft>",
-  "broll_md": "<path-to-broll-design.md>",
-  "ai_image_dir": "<path-to-normalized-ai-images>",
-  "visual_slot_plan": "<path-to-visual-slot-plan.json>",
+  "draft_dir": "D:\\JianyingPro Drafts\\CURRENT_PROJECT",
+  "broll_md": "D:\\path\\to\\broll_design.md",
+  "ai_image_dir": "D:\\path\\to\\normalized_ai_images",
+  "visual_slot_plan": "D:\\path\\to\\visual_slot_plan.json",
   "jy_draftc": "%JY_DRAFTC_EXE%",
   "notes": [
     "This file is documentation only. run_direct_draft_write.ps1 and run_pipeline_contract_check.ps1 require explicit arguments.",

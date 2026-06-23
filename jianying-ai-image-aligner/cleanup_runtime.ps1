@@ -6,11 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RuntimeDir) {
-    $runtimeRoot = $env:AUTO_CLIP_RUNTIME_DIR
-    if (-not $runtimeRoot) {
-        $runtimeRoot = Join-Path $HOME ".auto_clip_runtime"
-    }
-    $RuntimeDir = Join-Path $runtimeRoot "image_aligner\runs"
+    $RuntimeDir = "D:\auto_clip_runtime\image_aligner\runs"
 }
 
 if (-not (Test-Path -LiteralPath $RuntimeDir -PathType Container)) {

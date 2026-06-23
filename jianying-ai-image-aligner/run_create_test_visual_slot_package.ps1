@@ -21,6 +21,11 @@ foreach ($PathToCheck in @($DraftDir, $SourceImageDir, $ReferenceBroll)) {
   }
 }
 
+$Python = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (!(Test-Path -LiteralPath $Python)) {
+  $Python = "python"
+}
+
 $ArgsList = @(
   (Join-Path $PSScriptRoot "src\create_test_visual_slot_package.py"),
   "--draft-dir", $DraftDir,
@@ -42,5 +47,5 @@ if ($Recursive) {
   $ArgsList += "--recursive"
 }
 
-$ExitCode = Invoke-ImageAlignerPython -Arguments $ArgsList
-exit $ExitCode
+& $Python @ArgsList
+exit $LASTEXITCODE

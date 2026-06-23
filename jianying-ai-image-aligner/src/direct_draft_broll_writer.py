@@ -283,6 +283,8 @@ def visual_slot_rows(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, list):
         rows = raw
     elif isinstance(raw, dict):
+        if raw.get("ready_for_image_alignment") is False:
+            raise RuntimeError("visual_slot_plan 未通过上游校验：ready_for_image_alignment=false")
         rows = []
         for key in ("slots", "visual_slots", "image_slots"):
             if isinstance(raw.get(key), list):

@@ -29,15 +29,7 @@ if ([string]::IsNullOrWhiteSpace($JyDraftc) -or !(Test-Path -LiteralPath $JyDraf
 }
 
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$RuntimeRoot = $env:IMAGE_ALIGNER_RUNTIME_DIR
-if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-  $AutoClipRuntime = $env:AUTO_CLIP_RUNTIME_DIR
-  if ([string]::IsNullOrWhiteSpace($AutoClipRuntime)) {
-    $AutoClipRuntime = Join-Path $HOME ".auto_clip_runtime"
-  }
-  $RuntimeRoot = Join-Path $AutoClipRuntime "image_aligner"
-}
-$OutRoot = Join-Path $RuntimeRoot "preproduction_checks\preproduction_$Stamp"
+$OutRoot = "D:\auto_clip_runtime\image_aligner\preproduction_checks\preproduction_$Stamp"
 New-Item -ItemType Directory -Force -Path $OutRoot | Out-Null
 
 Write-Host "PREPRODUCTION_DRAFT_DIR=$DraftDir"
@@ -81,20 +73,14 @@ if ($NegativeExit -ne 0) {
   throw "Preproduction negative tests failed. Log: $NegativeLog"
 }
 
-$RunsDir = Join-Path $RuntimeRoot "runs"
-$NegativeTestsDir = Join-Path $RuntimeRoot "negative_tests"
-$LatestPreflight = if (Test-Path -LiteralPath $RunsDir) {
-  Get-ChildItem -LiteralPath $RunsDir -Directory |
-    Where-Object { $_.Name -like "direct_write_*" } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-} else { $null }
-$LatestNegative = if (Test-Path -LiteralPath $NegativeTestsDir) {
-  Get-ChildItem -LiteralPath $NegativeTestsDir -Directory |
-    Where-Object { $_.Name -like "negative_tests_*" } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-} else { $null }
+$LatestPreflight = Get-ChildItem -LiteralPath "D:\auto_clip_runtime\image_aligner\runs" -Directory |
+  Where-Object { $_.Name -like "direct_write_*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+$LatestNegative = Get-ChildItem -LiteralPath "D:\auto_clip_runtime\image_aligner\negative_tests" -Directory |
+  Where-Object { $_.Name -like "negative_tests_*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
 
 $Summary = [ordered]@{
   status = "ready"

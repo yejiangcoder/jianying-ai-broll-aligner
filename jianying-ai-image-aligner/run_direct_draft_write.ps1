@@ -23,6 +23,10 @@ Write-Host "CONFIRM_BROLL_MD=$BrollMd"
 Write-Host "CONFIRM_IMAGE_DIR=$ImageDir"
 Write-Host "CONFIRM_VISUAL_SLOT_PLAN=$VisualSlotPlan"
 Write-Host "CONFIRM_MODE=$(if ($ConfirmWrite) { 'WRITE_AFTER_PREFLIGHT' } else { 'PREFLIGHT_ONLY' })"
+$Python = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (!(Test-Path -LiteralPath $Python)) {
+  $Python = "python"
+}
 
 $WriterArgs = @(
   (Join-Path $PSScriptRoot "src\direct_draft_broll_writer.py"),
@@ -46,5 +50,5 @@ if ($ConfirmWrite) {
   $WriterArgs += "--preflight-only"
 }
 
-$ExitCode = Invoke-ImageAlignerPython -Arguments $WriterArgs
-exit $ExitCode
+& $Python @WriterArgs
+exit $LASTEXITCODE

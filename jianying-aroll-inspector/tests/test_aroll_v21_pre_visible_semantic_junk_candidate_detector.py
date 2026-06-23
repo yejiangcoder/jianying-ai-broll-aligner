@@ -132,6 +132,136 @@ class PreVisibleSemanticJunkTest(unittest.TestCase):
 
         self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 0, report)
 
+    def test_repairs_standalone_topic_prefix_restart_before_longer_caption(self) -> None:
+        rows = [
+            ("w001", "享受到的快乐给抹平吗", 0, 1_200_000),
+            ("w002", "集美", 1_260_000, 1_820_000),
+            ("w003", "我说集美比你们更懂得爱自己", 1_900_000, 3_400_000),
+        ]
+        source_graph = _graph_for_rows(rows)
+        timeline = [_segment(index, word_id, text, start, end) for index, (word_id, text, start, end) in enumerate(rows, start=1)]
+        renderer = SubtitleRenderer()
+        captions = renderer.render(timeline, source_graph)
+
+        report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+
+        self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 1, report)
+        candidate = report["pre_visible_semantic_junk_candidates"][0]
+        self.assertEqual(candidate["type"], "standalone_topic_prefix_restart")
+        self.assertEqual(candidate["proposed_action"], "drop_fragment")
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertEqual(
+            [segment.text for segment in result.final_timeline],
+            ["享受到的快乐给抹平吗", "我说集美比你们更懂得爱自己"],
+        )
+        self.assertEqual(
+            [caption.text for caption in result.captions],
+            ["享受到的快乐给抹平吗", "我说集美比你们更懂得爱自己"],
+        )
+        action = result.report["pre_visible_semantic_junk_repair_actions"][0]
+        self.assertEqual(action["candidate_type"], "standalone_topic_prefix_restart")
+        self.assertEqual(action["dropped_word_ids"], ["w002"])
+
+    def test_repairs_adjacent_suffix_semantic_recurrence_by_dropping_shorter_tail(self) -> None:
+        rows = [
+            ("w001", "你真的以为几个字就能把人家实打实的快乐给抹平吗", 0, 2_400_000),
+            ("w002", "享受到的快乐给抹平吗", 2_480_000, 3_600_000),
+            ("w003", "下一句继续推进观点", 3_680_000, 4_600_000),
+        ]
+        source_graph = _graph_for_rows(rows)
+        timeline = [_segment(index, word_id, text, start, end) for index, (word_id, text, start, end) in enumerate(rows, start=1)]
+        renderer = SubtitleRenderer()
+        captions = renderer.render(timeline, source_graph)
+
+        report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+
+        self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 1, report)
+        candidate = report["pre_visible_semantic_junk_candidates"][0]
+        self.assertEqual(candidate["type"], "adjacent_suffix_semantic_recurrence")
+        self.assertEqual(candidate["proposed_action"], "drop_fragment")
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertEqual(
+            [segment.text for segment in result.final_timeline],
+            ["你真的以为几个字就能把人家实打实的快乐给抹平吗", "下一句继续推进观点"],
+        )
+        self.assertEqual(
+            [caption.text for caption in result.captions],
+            ["你真的以为几个字就能把人家实打实的快乐给抹平吗", "下一句继续推进观点"],
+        )
+        action = result.report["pre_visible_semantic_junk_repair_actions"][0]
+        self.assertEqual(action["candidate_type"], "adjacent_suffix_semantic_recurrence")
+        self.assertEqual(action["dropped_word_ids"], ["w002"])
+
+    def test_repairs_adjacent_reordered_semantic_restart_by_dropping_less_complete_left_caption(self) -> None:
+        rows = [
+            ("w001", "前面观点继续推进", 0, 800_000),
+            ("w002", "而如果国男被扔进去", 880_000, 1_900_000),
+            ("w003", "而国南如果被扔进这个场景", 1_900_000, 3_100_000),
+            ("w004", "后面解释具体后果", 3_180_000, 4_100_000),
+        ]
+        source_graph = _graph_for_rows(rows)
+        timeline = [_segment(index, word_id, text, start, end) for index, (word_id, text, start, end) in enumerate(rows, start=1)]
+        renderer = SubtitleRenderer()
+        captions = renderer.render(timeline, source_graph)
+
+        report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+
+        candidates = report["pre_visible_semantic_junk_candidates"]
+        self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 1, report)
+        self.assertEqual(candidates[0]["type"], "adjacent_reordered_semantic_restart")
+        self.assertEqual(candidates[0]["proposed_action"], "drop_fragment")
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertEqual(
+            [segment.text for segment in result.final_timeline],
+            ["前面观点继续推进", "而国南如果被扔进这个场景", "后面解释具体后果"],
+        )
+        self.assertEqual(
+            [caption.text for caption in result.captions],
+            ["前面观点继续推进", "而国南如果被扔进这个场景", "后面解释具体后果"],
+        )
+        action = result.report["pre_visible_semantic_junk_repair_actions"][0]
+        self.assertEqual(action["candidate_type"], "adjacent_reordered_semantic_restart")
+        self.assertEqual(action["dropped_word_ids"], ["w002"])
+
+    def test_reordered_semantic_restart_keeps_clear_gender_contrast(self) -> None:
+        rows = [
+            ("w001", "如果女生被扔进去", 0, 900_000),
+            ("w002", "如果男生被扔进这个场景", 980_000, 2_100_000),
+            ("w003", "后面继续比较差异", 2_180_000, 3_000_000),
+        ]
+        source_graph = _graph_for_rows(rows)
+        timeline = [_segment(index, word_id, text, start, end) for index, (word_id, text, start, end) in enumerate(rows, start=1)]
+        captions = SubtitleRenderer().render(timeline, source_graph)
+
+        report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+
+        self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 0, report)
+        self.assertFalse(
+            any(row["proposed_action"] == "drop_fragment" for row in report["pre_visible_semantic_junk_candidates"]),
+            report,
+        )
+
     def test_enumeration_structure_is_not_semantic_junk(self) -> None:
         rows = [
             ("w001", "她有几个判断标准", 0, 800_000),

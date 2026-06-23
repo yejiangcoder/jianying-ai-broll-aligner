@@ -49,9 +49,7 @@ function Get-DefaultJyDraftc {
   if ($env:JY_DRAFTC_EXE -and (Test-Path -LiteralPath $env:JY_DRAFTC_EXE)) {
     return [string]$env:JY_DRAFTC_EXE
   }
-  $repoRoot = Split-Path -Parent $PSScriptRoot
-  $suiteRoot = Split-Path -Parent $repoRoot
-  $known = Join-Path $suiteRoot "jianying-ai-image-aligner\vendor\jy-draftc-bin\jy-draftc-amd64-windows\jy-draftc.exe"
+  $known = "D:\video tools\jianying-ai-image-aligner\vendor\jy-draftc-bin\jy-draftc-amd64-windows\jy-draftc.exe"
   if (Test-Path -LiteralPath $known) {
     return $known
   }

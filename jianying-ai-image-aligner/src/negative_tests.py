@@ -98,25 +98,27 @@ def mutate_slot_overlap(plan_path: Path) -> None:
 
 
 def mutate_slot_exceeds_container(plan_path: Path, draft_data: dict[str, Any]) -> None:
-    image_ids, image_files = [], {}
-    # Use load_visual_slot_plan's parsing after callers set image_files; here only mutate raw JSON.
     data = load_plan(plan_path)
     slot = data["slots"][0]
     container_id = str(slot["container_video_segment_ids"][0])
-    video_end = None
+    video_start = None
     for track in draft_data.get("tracks", []):
         if track.get("type") != "video":
             continue
         for segment in track.get("segments", []):
             if str(segment.get("id") or "") == container_id:
                 timerange = segment.get("target_timerange") or {}
-                video_end = int(timerange.get("start") or 0) + int(timerange.get("duration") or 0)
+                video_start = int(timerange.get("start") or 0)
                 break
-        if video_end is not None:
+        if video_start is not None:
             break
-    if video_end is None:
+    if video_start is None:
         raise RuntimeError(f"找不到测试 container video segment：{container_id}")
-    slot["target_end_us"] = video_end + 500_000
+    # Keep this mutation focused on the video-container validator. Moving the
+    # first slot just before its container avoids triggering the overlap gate
+    # first when the next real slot starts close to this container's end.
+    slot["target_start_us"] = video_start - 200_000
+    slot["target_end_us"] = video_start - 100_000
     slot["duration_us"] = int(slot["target_end_us"]) - int(slot["target_start_us"])
     write_plan(plan_path, data)
 

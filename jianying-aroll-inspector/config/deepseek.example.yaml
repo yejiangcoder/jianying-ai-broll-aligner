@@ -1,5 +1,5 @@
 deepseek:
-  # Replace with your real DeepSeek API key, or create config/deepseek.yaml locally.
-  api-key: "REPLACE_WITH_DEEPSEEK_API_KEY"
+  # Replace with your real DeepSeek API key, or edit config/deepseek.yaml directly in this private repo.
+  api-key: "sk-REPLACE_WITH_DEEPSEEK_API_KEY"
   base-url: "https://api.deepseek.com"
   model: "deepseek-chat"

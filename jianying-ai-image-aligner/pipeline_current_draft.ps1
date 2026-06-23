@@ -9,11 +9,7 @@ function Resolve-ImageAlignerDraftDir {
 
   $StatePath = $env:VIDEO_PIPELINE_CURRENT_DRAFT_STATE
   if ([string]::IsNullOrWhiteSpace($StatePath)) {
-    $runtimeRoot = $env:AUTO_CLIP_RUNTIME_DIR
-    if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
-      $runtimeRoot = Join-Path $HOME ".auto_clip_runtime"
-    }
-    $StatePath = Join-Path $runtimeRoot "video_pipeline\current_draft.json"
+    $StatePath = "D:\auto_clip_runtime\video_pipeline\current_draft.json"
   }
   if (!(Test-Path -LiteralPath $StatePath)) {
     throw "DraftDir is empty and current draft state does not exist: $StatePath. Run run_bind_current_draft.ps1 after A-Roll QC passes."
@@ -40,32 +36,4 @@ function Resolve-ImageAlignerDraftDir {
   Write-Host "AUTO_BOUND_DRAFT_STATE=$StatePath"
   Write-Host "AUTO_BOUND_DRAFT_DIR=$ResolvedDraftDir"
   return $ResolvedDraftDir
-}
-
-function Invoke-ImageAlignerPython {
-  param(
-    [string[]]$Arguments
-  )
-
-  $configured = [string]$env:PYTHON
-  if (-not [string]::IsNullOrWhiteSpace($configured)) {
-    & $configured @Arguments
-    return $LASTEXITCODE
-  }
-
-  $py = Get-Command py.exe -ErrorAction SilentlyContinue
-  if ($py) {
-    & $py.Source -3 @Arguments
-    return $LASTEXITCODE
-  }
-
-  $python = Get-Command python.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.Source -and $_.Source -notlike "*\WindowsApps\python.exe" } |
-    Select-Object -First 1
-  if ($python) {
-    & $python.Source @Arguments
-    return $LASTEXITCODE
-  }
-
-  throw "No usable Python found. Set PYTHON, install py launcher, or add python.exe to PATH."
 }

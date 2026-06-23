@@ -2,16 +2,20 @@ param(
   [string]$DraftDir,
   [string]$JyDraftc = "",
   [string]$StatePath = "",
-  [string]$Stage = "aroll_qc_passed"
+  [string]$Stage = "aroll_written"
 )
 
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "pipeline_current_draft.ps1")
 if ([string]::IsNullOrWhiteSpace($DraftDir)) {
   throw "Explicit -DraftDir is required when binding the QC-passed draft."
 }
 if (!(Test-Path -LiteralPath $DraftDir)) {
   throw "DraftDir does not exist: $DraftDir"
+}
+
+$Python = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (!(Test-Path -LiteralPath $Python)) {
+  $Python = "python"
 }
 
 $ArgsList = @(
@@ -29,5 +33,5 @@ if (![string]::IsNullOrWhiteSpace($StatePath)) {
   $ArgsList += @("--state-path", $StatePath)
 }
 
-$ExitCode = Invoke-ImageAlignerPython -Arguments $ArgsList
-exit $ExitCode
+& $Python @ArgsList
+exit $LASTEXITCODE

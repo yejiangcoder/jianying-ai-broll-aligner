@@ -4,11 +4,11 @@ import os
 from pathlib import Path
 
 
-DEFAULT_RUNTIME_ROOT = Path.home() / ".auto_clip_runtime" / "image_aligner"
+DEFAULT_RUNTIME_ROOT = Path(r"D:\auto_clip_runtime\image_aligner")
 
 
 def get_runtime_root() -> Path:
-    return Path(os.environ.get("IMAGE_ALIGNER_RUNTIME_DIR") or DEFAULT_RUNTIME_ROOT)
+    return Path(os.environ.get("IMAGE_ALIGNER_RUNTIME_DIR", DEFAULT_RUNTIME_ROOT))
 
 
 def get_runs_dir() -> Path:

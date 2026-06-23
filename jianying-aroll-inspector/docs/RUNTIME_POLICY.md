@@ -5,7 +5,7 @@ Runtime data is stored outside the source directory by default.
 Default layout:
 
 ```text
-%USERPROFILE%\.auto_clip_runtime\
+D:\auto_clip_runtime\
   arll\
     runs\
     reports\
@@ -32,7 +32,7 @@ Default layout:
 Rules:
 
 - Do not create a junction or symlink from project `runtime/` to the external runtime.
-- Do not add `%USERPROFILE%\.auto_clip_runtime` or any configured runtime root as an IDEA content root.
+- Do not add `D:\auto_clip_runtime` as an IDEA content root.
 - Do not include runtime data in release packages or dev snapshots.
 - Migration is dry-run by default.
 - No source files are deleted during migration.

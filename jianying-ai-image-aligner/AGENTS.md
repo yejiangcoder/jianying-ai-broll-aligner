@@ -70,12 +70,12 @@ This is the only supported implementation route. The old v0.1 code path was remo
 
 Runtime output is external:
 
-`<runtime-root>\image_aligner`
+`D:\auto_clip_runtime\image_aligner`
 
 IDEA Codex:
 
 - Only edit `src`, run scripts, and docs.
-- Do not scan `<runtime-root>`.
+- Do not scan `D:\auto_clip_runtime`.
 - Do not scan `vendor` unless explicitly requested.
 - Do not read historical runtime JSON by default.
 - Do not execute real UI drag operations.

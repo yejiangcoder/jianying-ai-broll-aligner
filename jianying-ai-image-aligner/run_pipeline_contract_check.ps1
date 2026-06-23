@@ -17,6 +17,10 @@ foreach ($PathToCheck in @($DraftDir, $BrollMd, $ImageDir, $VisualSlotPlan)) {
     throw "Path does not exist: $PathToCheck"
   }
 }
+$Python = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (!(Test-Path -LiteralPath $Python)) {
+  $Python = "python"
+}
 
 & (Join-Path $PSScriptRoot "cleanup_runtime.ps1") -KeepLatest 5 -ConfirmDelete
 
@@ -34,5 +38,5 @@ if (![string]::IsNullOrWhiteSpace($JyDraftc)) {
   $CheckArgs += @("--jy-draftc", $JyDraftc)
 }
 
-$ExitCode = Invoke-ImageAlignerPython -Arguments $CheckArgs
-exit $ExitCode
+& $Python @CheckArgs
+exit $LASTEXITCODE

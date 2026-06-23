@@ -29,6 +29,11 @@ if ([string]::IsNullOrWhiteSpace($JyDraftc) -or !(Test-Path -LiteralPath $JyDraf
   throw "jy-draftc path does not exist. Pass -JyDraftc or set JY_DRAFTC_EXE/JY_DRAFTC."
 }
 
+$Python = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (!(Test-Path -LiteralPath $Python)) {
+  $Python = "python"
+}
+
 $ArgsList = @(
   (Join-Path $PSScriptRoot "src\negative_tests.py"),
   "--draft-dir", $DraftDir,
@@ -41,5 +46,5 @@ if (![string]::IsNullOrWhiteSpace($OutDir)) {
   $ArgsList += @("--out-dir", $OutDir)
 }
 
-$ExitCode = Invoke-ImageAlignerPython -Arguments $ArgsList
-exit $ExitCode
+& $Python @ArgsList
+exit $LASTEXITCODE

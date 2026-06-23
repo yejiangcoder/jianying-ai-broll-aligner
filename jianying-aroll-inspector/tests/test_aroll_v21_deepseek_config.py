@@ -209,7 +209,7 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "deepseek:",
-                        "  api" + "-key: REPLACE_WITH_DEEPSEEK_API_KEY",
+                        "  api" + "-key: sk-REPLACE_WITH_DEEPSEEK_API_KEY",
                         "  base-url: https://api.deepseek.com",
                     ]
                 ),

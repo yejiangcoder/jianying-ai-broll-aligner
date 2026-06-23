@@ -28,10 +28,10 @@
 
 ## Pipeline Stage
 
-图片对齐是流水线第 4 阶段：
+图片对齐是 `visual_slot_plan` 生成/校验之后的写图阶段：
 
 ```text
-A-Roll 通过 QC -> B-Roll 设计稿通过 QC -> AI 批量跑图通过 QC -> 图片对齐写入 -> GUI QC
+A-Roll 通过 QC -> B-Roll 设计稿通过 QC -> AI 批量跑图通过 QC -> visual_slot_plan 生成/校验 -> 图片对齐写入 -> GUI QC
 ```
 
 写入前仍有确认门槛：没有 `-ConfirmWrite` / `--confirm-write` 时，只生成 preflight 确认单，不写草稿。
@@ -39,6 +39,14 @@ A-Roll 通过 QC -> B-Roll 设计稿通过 QC -> AI 批量跑图通过 QC -> 图
 ## visual_slot_plan
 
 本阶段不再猜字幕轨，也不重新做语义对齐。时间轴来源只能是上游输出的 `visual_slot_plan.json`。
+
+标准上游生成器：
+
+```text
+D:\video tools\broll-designs\scripts\create_visual_slot_plan_from_broll.ps1
+```
+
+该生成器消费已 QC 的 B-Roll 设计稿、`broll_handoff_manifest.json`、人工精剪最终字幕时间轴和已 QC 图片目录。只有 `visual_slot_plan.json.ready_for_image_alignment=true` 才允许进入本工具。
 
 ```json
 {
@@ -51,7 +59,7 @@ A-Roll 通过 QC -> B-Roll 设计稿通过 QC -> AI 批量跑图通过 QC -> 图
       "source_start_us": 900000,
       "source_end_us": 3120000,
       "container_video_segment_ids": ["..."],
-      "image_path": "<path-to>\\image_AI_01_scene.png"
+      "image_path": "D:\\path\\to\\image_AI_01_scene.png"
     }
   ]
 }
@@ -80,9 +88,9 @@ Create an isolated 10-image test package from a real draft and AI image director
 
 ```powershell
 .\run_create_test_visual_slot_package.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -SourceImageDir "<path-to-ai-images>" `
-  -ReferenceBroll "<path-to>\真实B-roll设计.md" `
+  -DraftDir "D:\JianyingPro Drafts\CURRENT_PROJECT" `
+  -SourceImageDir "D:\video\...\AI静态图目录" `
+  -ReferenceBroll "D:\path\to\真实B-roll设计.md" `
   -Count 10
 ```
 
@@ -97,20 +105,20 @@ Preflight：
 
 ```powershell
 .\run_direct_draft_write.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -BrollMd "<path-to>\broll.md" `
-  -ImageDir "<path-to>\images" `
-  -VisualSlotPlan "<path-to>\visual_slot_plan.json"
+  -DraftDir "D:\JianyingPro Drafts\CURRENT_PROJECT" `
+  -BrollMd "D:\path\to\broll.md" `
+  -ImageDir "D:\path\to\images" `
+  -VisualSlotPlan "D:\path\to\visual_slot_plan.json"
 ```
 
 Write after AI image QC：
 
 ```powershell
 .\run_direct_draft_write.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -BrollMd "<path-to>\broll.md" `
-  -ImageDir "<path-to>\images" `
-  -VisualSlotPlan "<path-to>\visual_slot_plan.json" `
+  -DraftDir "D:\JianyingPro Drafts\CURRENT_PROJECT" `
+  -BrollMd "D:\path\to\broll.md" `
+  -ImageDir "D:\path\to\images" `
+  -VisualSlotPlan "D:\path\to\visual_slot_plan.json" `
   -ConfirmWrite
 ```
 
@@ -118,19 +126,19 @@ Post-write contract check：
 
 ```powershell
 .\run_pipeline_contract_check.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -BrollMd "<path-to>\broll.md" `
-  -ImageDir "<path-to>\images" `
-  -VisualSlotPlan "<path-to>\visual_slot_plan.json"
+  -DraftDir "D:\JianyingPro Drafts\CURRENT_PROJECT" `
+  -BrollMd "D:\path\to\broll.md" `
+  -ImageDir "D:\path\to\images" `
+  -VisualSlotPlan "D:\path\to\visual_slot_plan.json"
 ```
 
 Negative contract sweep：
 
 ```powershell
 .\run_negative_tests.ps1 `
-  -BrollMd "<path-to>\broll.md" `
-  -ImageDir "<path-to>\images" `
-  -VisualSlotPlan "<path-to>\visual_slot_plan.json"
+  -BrollMd "D:\path\to\broll.md" `
+  -ImageDir "D:\path\to\images" `
+  -VisualSlotPlan "D:\path\to\visual_slot_plan.json"
 ```
 
 This sweep must pass before treating the tool as production-ready for a new draft class. It uses disposable mutated packages and a disposable draft clone for rollback verification.
@@ -139,9 +147,9 @@ Preproduction check：
 
 ```powershell
 .\run_preproduction_check.ps1 `
-  -BrollMd "<path-to>\broll.md" `
-  -ImageDir "<path-to>\images" `
-  -VisualSlotPlan "<path-to>\visual_slot_plan.json"
+  -BrollMd "D:\path\to\broll.md" `
+  -ImageDir "D:\path\to\images" `
+  -VisualSlotPlan "D:\path\to\visual_slot_plan.json"
 ```
 
 This is the final gate before a real `-ConfirmWrite`: it runs preflight-only input validation and the negative sweep. It does not write the active draft. Post-write actual contract check runs after `-ConfirmWrite`.
@@ -179,7 +187,7 @@ Post-write audit must pass before GUI QC:
 运行输出在外部 runtime：
 
 ```text
-<runtime-root>\image_aligner\runs
+D:\auto_clip_runtime\image_aligner\runs
 ```
 
 `agent_inputs.example.json` 只作为文档示例。真实本地路径请放在命令参数或本机私有配置中，`agent_inputs.json` 已加入 `.gitignore`。

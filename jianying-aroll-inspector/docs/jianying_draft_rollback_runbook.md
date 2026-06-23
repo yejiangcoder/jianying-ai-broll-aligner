@@ -10,7 +10,7 @@ scripts/rollback_jianying_draft.ps1 `
   -ExpectedSourceMediaRoot "<path-to-original-media-root>"
 ```
 
-Without `-Apply`, the script is analyze-only. It decrypts backup candidates, selects the most likely clean baseline, verifies the selected baseline against `-ExpectedSourceMediaRoot` when provided, and writes a report under `%USERPROFILE%\.auto_clip_runtime\draft_rollback_runs` unless `AUTO_CLIP_RUNTIME_DIR` or `-RunRoot` overrides it.
+Without `-Apply`, the script is analyze-only. It decrypts backup candidates, selects the most likely clean baseline, verifies the selected baseline against `-ExpectedSourceMediaRoot` when provided, and writes a report under the configured runtime `draft_rollback_runs` directory.
 
 To apply the rollback:
 

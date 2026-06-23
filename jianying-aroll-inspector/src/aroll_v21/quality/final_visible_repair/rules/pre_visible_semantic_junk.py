@@ -87,7 +87,13 @@ def _is_deterministic_pre_visible_semantic_junk_drop(candidate: dict[str, Any]) 
         return False
     if float(candidate.get("local_confidence") or 0.0) < PRE_VISIBLE_SEMANTIC_JUNK_MIN_HIGH_CONFIDENCE:
         return False
-    if str(candidate.get("type") or "") not in {"aborted_restart", "prefix_restart"}:
+    if str(candidate.get("type") or "") not in {
+        "aborted_restart",
+        "adjacent_reordered_semantic_restart",
+        "adjacent_suffix_semantic_recurrence",
+        "prefix_restart",
+        "standalone_topic_prefix_restart",
+    }:
         return False
     safety_tags = {str(value) for value in list(candidate.get("safety_tags") or [])}
     return "drop_audio_and_caption_together" in safety_tags

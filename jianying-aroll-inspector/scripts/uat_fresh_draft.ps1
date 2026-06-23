@@ -134,6 +134,7 @@ function Resolve-JianyingInstallDir {
       $roots += $parent
     }
   }
+  $roots += "D:\JianyingPro"
   $roots = $roots | Where-Object { $_ } | Select-Object -Unique
 
   $candidates = @()
@@ -195,6 +196,12 @@ if (-not (Test-Path -LiteralPath $DraftDir)) {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $repoRoot "src"
+if (-not $env:REFERENCE_VIDEO_DATA_CATCHER_DEEPSEEK_CONFIG_PATH) {
+  $referenceDeepSeekConfig = "D:\idea-project\videoDataCatcher\src\main\resources\application.yaml"
+  if (Test-Path -LiteralPath $referenceDeepSeekConfig) {
+    $env:REFERENCE_VIDEO_DATA_CATCHER_DEEPSEEK_CONFIG_PATH = $referenceDeepSeekConfig
+  }
+}
 Sync-JyDraftcEnv
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runDir = ""

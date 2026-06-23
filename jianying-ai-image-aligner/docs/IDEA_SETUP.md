@@ -3,14 +3,14 @@
 Open only:
 
 ```text
-<suite-root>\jianying-ai-image-aligner
+D:\video tools\jianying-ai-image-aligner
 ```
 
 Do not open:
 
 ```text
-<suite-root>
-<runtime-root>
+D:\video tools
+D:\auto_clip_runtime
 ```
 
 Daily Codex context should be limited to:

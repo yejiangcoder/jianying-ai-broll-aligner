@@ -34,7 +34,7 @@ Example:
 
 ```powershell
 py -3 tools/package_aroll_v21_audit_zip.py `
-  --output-zip "%USERPROFILE%\.auto_clip_runtime\aroll_v21_audit.zip"
+  --output-zip D:\auto_clip_runtime\aroll_v21_audit.zip
 ```
 
 The packaging script is deterministic enough for audit handoff but does not run real UAT, write drafts, or encrypt/decrypt content.

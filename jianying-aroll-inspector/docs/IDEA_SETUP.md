@@ -3,13 +3,13 @@
 Open only:
 
 ```text
-<suite-root>\jianying-aroll-inspector
+D:\video tools\jianying-aroll-inspector
 ```
 
 Do not add this directory as a content root:
 
 ```text
-%USERPROFILE%\.auto_clip_runtime
+D:\auto_clip_runtime
 ```
 
 Mark these project-local directories as excluded if they still exist:
