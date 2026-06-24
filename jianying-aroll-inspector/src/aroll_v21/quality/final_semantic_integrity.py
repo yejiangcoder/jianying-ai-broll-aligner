@@ -73,6 +73,19 @@ DANGLING_DISCOURSE_CONNECTORS = tuple(
         reverse=True,
     )
 )
+DISCOURSE_PRONOUN_TAIL_PRONOUNS = (
+    "我",
+    "你",
+    "他",
+    "她",
+    "它",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+    "自己",
+    "人家",
+)
 STANDALONE_CLASSIFIERS = frozenset("个件条张节款台辆本套部名位份颗枚")
 OPEN_SINGLE_CHAR_TAILS = frozenset("大大小高低贵贱好差新旧多少美丑强弱冷热")
 NOMINAL_PHRASE_HEAD_TAILS = frozenset("人心事物钱脸手脚头口眼车房课话路门店片图文号单")
@@ -307,6 +320,20 @@ def _incomplete_lexical_tail_candidate(
             action_hint="trim_dangling_connector_tail",
             evidence={"connector": dangling_connector, "tail_context": text[-min(len(text), len(dangling_connector) + 2) :]},
         )
+    dangling_connector_pronoun = dangling_discourse_pronoun_suffix(text)
+    if dangling_connector_pronoun and not _has_immediate_predicate_continuation(caption, next_caption, text):
+        return _candidate(
+            "dangling_discourse_pronoun_tail",
+            caption,
+            caption,
+            overlap_text=dangling_connector_pronoun,
+            text=text,
+            action_hint="trim_dangling_discourse_pronoun_tail",
+            evidence={
+                "connector_pronoun_tail": dangling_connector_pronoun,
+                "tail_context": text[-min(len(text), len(dangling_connector_pronoun) + 2) :],
+            },
+        )
     if text[-2:] in {"可以", "所以", "因为", "但是", "然后"}:
         return None
     if text[-1] in HARD_OPEN_CLAUSE_TAILS:
@@ -518,6 +545,18 @@ def dangling_discourse_connector_suffix(text: str) -> str:
     for connector in DANGLING_DISCOURSE_CONNECTORS:
         if normalized.endswith(connector) and len(normalized) > len(connector) + 1:
             return connector
+    return ""
+
+
+def dangling_discourse_pronoun_suffix(text: str) -> str:
+    normalized = normalize_text(text)
+    if not normalized:
+        return ""
+    for connector in DANGLING_DISCOURSE_CONNECTORS:
+        for pronoun in DISCOURSE_PRONOUN_TAIL_PRONOUNS:
+            suffix = connector + pronoun
+            if normalized.endswith(suffix) and len(normalized) > len(suffix) + 1:
+                return suffix
     return ""
 
 

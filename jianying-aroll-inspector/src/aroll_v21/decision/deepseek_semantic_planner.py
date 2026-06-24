@@ -46,10 +46,14 @@ DEFAULT_DEEPSEEK_CONFIG_PATHS = (
 )
 LEGACY_REFERENCE_DEEPSEEK_CONFIG_ENV = "REFERENCE_VIDEO_DATA_CATCHER_DEEPSEEK_CONFIG_PATH"
 DEFAULT_BATCH_MAX_ATTEMPTS = 3
-DEFAULT_SINGLE_ATTEMPT_TIMEOUT_SECONDS = 90
-DEFAULT_TOTAL_BATCH_TIMEOUT_SECONDS = 300
-DEFAULT_BATCH_MAX_ISSUES = 40
+DEFAULT_SINGLE_ATTEMPT_TIMEOUT_SECONDS = 180
+DEFAULT_TOTAL_BATCH_TIMEOUT_SECONDS = 600
+DEFAULT_BATCH_MAX_ISSUES = 6
 DEFAULT_BATCH_MAX_PROMPT_CHARS = 120_000
+DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 180
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_DEEPSEEK_THINKING_TYPE = "enabled"
+DEFAULT_DEEPSEEK_REASONING_EFFORT = "high"
 SEMANTIC_BATCH_PROVIDER_FAILED_CODE = "V21_SEMANTIC_BATCH_PROVIDER_FAILED"
 SEMANTIC_BATCH_PROVIDER_MISSING_CODE = "V21_SEMANTIC_BATCH_PROVIDER_MISSING"
 SEMANTIC_BATCH_PARTIAL_RESPONSE_CODE = "V21_SEMANTIC_BATCH_PARTIAL_RESPONSE"
@@ -89,14 +93,19 @@ class DeepSeekSemanticProvider:
         *,
         api_key: str,
         base_url: str = "https://api.deepseek.com/chat/completions",
-        model: str = "deepseek-chat",
-        timeout_s: int = 30,
+        model: str = DEFAULT_DEEPSEEK_MODEL,
+        thinking_type: str = "",
+        reasoning_effort: str = DEFAULT_DEEPSEEK_REASONING_EFFORT,
+        timeout_s: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
         config_source: str = "",
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
-        self.model = model
-        self.timeout_s = min(max(1, int(timeout_s or 30)), DEFAULT_SINGLE_ATTEMPT_TIMEOUT_SECONDS)
+        normalized = _normalize_deepseek_model_settings(model, thinking_type, reasoning_effort)
+        self.model = normalized["model"]
+        self.thinking_type = normalized["thinking_type"]
+        self.reasoning_effort = normalized["reasoning_effort"]
+        self.timeout_s = min(max(1, int(timeout_s or DEFAULT_DEEPSEEK_TIMEOUT_SECONDS)), DEFAULT_SINGLE_ATTEMPT_TIMEOUT_SECONDS)
         self.config_source = config_source
         self._reset_batch_state()
 
@@ -254,7 +263,7 @@ class DeepSeekSemanticProvider:
                 existing_chunks.append(batch_payload)
         payload = {
             "model": self.model,
-            "temperature": 0,
+            "thinking": {"type": self.thinking_type},
             "messages": [
                 {
                     "role": "system",
@@ -272,6 +281,10 @@ class DeepSeekSemanticProvider:
             ],
             "response_format": {"type": "json_object"},
         }
+        if self.thinking_type == "enabled":
+            payload["reasoning_effort"] = self.reasoning_effort
+        else:
+            payload["temperature"] = 0
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.base_url,
@@ -529,14 +542,16 @@ def deepseek_provider_from_runtime_config() -> DeepSeekSemanticProvider | None:
     api_key = str(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_TOKEN") or "").strip()
     base_url = str(os.environ.get("DEEPSEEK_API_URL") or "").strip()
     model = str(os.environ.get("DEEPSEEK_MODEL") or "").strip()
-    timeout_s = int(os.environ.get("DEEPSEEK_TIMEOUT_S") or 30)
+    timeout_s = _configured_timeout_s(None)
     config = _load_deepseek_config_from_files()
     if config is not None and _is_configured_api_key(config.get("api_key", "")):
         return DeepSeekSemanticProvider(
             api_key=config["api_key"],
             base_url=_chat_completions_url(config.get("base_url", "")),
-            model=config.get("model") or "deepseek-chat",
-            timeout_s=timeout_s,
+            model=config.get("model") or DEFAULT_DEEPSEEK_MODEL,
+            thinking_type=config.get("thinking_type") or str(os.environ.get("DEEPSEEK_THINKING_TYPE") or ""),
+            reasoning_effort=config.get("reasoning_effort") or str(os.environ.get("DEEPSEEK_REASONING_EFFORT") or ""),
+            timeout_s=_configured_timeout_s(config),
             config_source=config.get("config_source", ""),
         )
     if not _is_configured_api_key(api_key):
@@ -546,7 +561,9 @@ def deepseek_provider_from_runtime_config() -> DeepSeekSemanticProvider | None:
     return DeepSeekSemanticProvider(
         api_key=api_key,
         base_url=_chat_completions_url(base_url or "https://api.deepseek.com/chat/completions"),
-        model=model or "deepseek-chat",
+        model=model or DEFAULT_DEEPSEEK_MODEL,
+        thinking_type=str(os.environ.get("DEEPSEEK_THINKING_TYPE") or ""),
+        reasoning_effort=str(os.environ.get("DEEPSEEK_REASONING_EFFORT") or ""),
         timeout_s=timeout_s,
         config_source=config_source,
     )
@@ -564,8 +581,10 @@ def deepseek_provider_from_config_file(path: Path) -> DeepSeekSemanticProvider |
     return DeepSeekSemanticProvider(
         api_key=config["api_key"],
         base_url=_chat_completions_url(config["base_url"]),
-        model=config.get("model") or "deepseek-chat",
-        timeout_s=int(os.environ.get("DEEPSEEK_TIMEOUT_S") or 30),
+        model=config.get("model") or DEFAULT_DEEPSEEK_MODEL,
+        thinking_type=config.get("thinking_type") or str(os.environ.get("DEEPSEEK_THINKING_TYPE") or ""),
+        reasoning_effort=config.get("reasoning_effort") or str(os.environ.get("DEEPSEEK_REASONING_EFFORT") or ""),
+        timeout_s=_configured_timeout_s(config),
         config_source=path.name,
     )
 
@@ -669,15 +688,27 @@ def _parse_deepseek_yaml_config(path: Path) -> dict[str, str]:
         if in_deepseek and ":" in stripped:
             key, raw_value = stripped.split(":", 1)
             normalized_key = key.strip().replace("-", "_")
-            if normalized_key in {"api_key", "base_url", "model"}:
+            if normalized_key in {"api_key", "base_url", "model", "thinking_type", "thinking", "reasoning_effort", "timeout_s", "timeout"}:
+                if normalized_key == "thinking":
+                    normalized_key = "thinking_type"
+                if normalized_key == "timeout":
+                    normalized_key = "timeout_s"
                 values[normalized_key] = _strip_yaml_scalar(raw_value)
     if not values.get("model"):
         models = [
             _strip_yaml_scalar(match.group(1))
             for match in re.finditer(r"(?m)^\s*model\s*:\s*(.+?)\s*$", "\n".join(lines))
         ]
-        if "deepseek-chat" in models:
-            values["model"] = "deepseek-chat"
+        if DEFAULT_DEEPSEEK_MODEL in models:
+            values["model"] = DEFAULT_DEEPSEEK_MODEL
+        elif "deepseek-v4-flash" in models:
+            values["model"] = "deepseek-v4-flash"
+        elif "deepseek-chat" in models:
+            values["model"] = DEFAULT_DEEPSEEK_MODEL
+            values.setdefault("thinking_type", "disabled")
+        elif "deepseek-reasoner" in models:
+            values["model"] = DEFAULT_DEEPSEEK_MODEL
+            values.setdefault("thinking_type", "enabled")
         elif models:
             values["model"] = models[-1]
     return values
@@ -697,6 +728,24 @@ def _strip_yaml_scalar(value: str) -> str:
     return text.strip()
 
 
+def _configured_timeout_s(config: dict[str, str] | None) -> int:
+    env_value = str(os.environ.get("DEEPSEEK_TIMEOUT_S") or "").strip()
+    if env_value:
+        return _safe_timeout_s(env_value, DEFAULT_DEEPSEEK_TIMEOUT_SECONDS)
+    if config is not None:
+        config_value = str(config.get("timeout_s") or "").strip()
+        if config_value:
+            return _safe_timeout_s(config_value, DEFAULT_DEEPSEEK_TIMEOUT_SECONDS)
+    return DEFAULT_DEEPSEEK_TIMEOUT_SECONDS
+
+
+def _safe_timeout_s(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _chat_completions_url(base_url: str) -> str:
     url = str(base_url or "").strip().rstrip("/")
     if not url:
@@ -704,6 +753,30 @@ def _chat_completions_url(base_url: str) -> str:
     if url.endswith("/chat/completions"):
         return url
     return url + "/chat/completions"
+
+
+def _normalize_deepseek_model_settings(model: str, thinking_type: str = "", reasoning_effort: str = "") -> dict[str, str]:
+    raw_model = str(model or "").strip() or DEFAULT_DEEPSEEK_MODEL
+    raw_thinking = str(thinking_type or "").strip().lower()
+    raw_effort = str(reasoning_effort or "").strip().lower()
+
+    if raw_model == "deepseek-chat":
+        raw_model = DEFAULT_DEEPSEEK_MODEL
+        raw_thinking = raw_thinking or "disabled"
+    elif raw_model == "deepseek-reasoner":
+        raw_model = DEFAULT_DEEPSEEK_MODEL
+        raw_thinking = raw_thinking or "enabled"
+
+    if raw_thinking not in {"enabled", "disabled"}:
+        raw_thinking = DEFAULT_DEEPSEEK_THINKING_TYPE
+    if raw_effort not in {"high", "max"}:
+        raw_effort = DEFAULT_DEEPSEEK_REASONING_EFFORT
+
+    return {
+        "model": raw_model,
+        "thinking_type": raw_thinking,
+        "reasoning_effort": raw_effort,
+    }
 
 
 def _decision_from_provider_row(row: dict[str, Any]) -> SemanticAdjudicationDecision:

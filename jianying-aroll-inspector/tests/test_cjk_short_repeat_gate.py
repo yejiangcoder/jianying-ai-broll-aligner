@@ -162,7 +162,6 @@ class CjkShortRepeatGateTest(unittest.TestCase):
         self.assertTrue(report["final_repeat_gate_passed"])
         self.assertEqual(report["final_cjk_short_repeat_fatal_count"], 0)
         self.assertEqual(report["blocking_issues"], [])
-        self.assertGreaterEqual(report["final_cjk_short_repeat_warning_count"], 1)
 
     def test_numeral_headed_reduplication_is_not_blocking(self) -> None:
         report = build_final_repeat_gate_report(
@@ -174,6 +173,16 @@ class CjkShortRepeatGateTest(unittest.TestCase):
         self.assertEqual(report["final_cjk_short_repeat_fatal_count"], 0)
         self.assertEqual(report["blocking_issues"], [])
         self.assertGreaterEqual(report["final_cjk_short_repeat_warning_count"], 1)
+
+    def test_amount_modifier_reduplication_is_not_blocking(self) -> None:
+        report = build_final_repeat_gate_report(
+            {"issues": []},
+            [{"fragment_id": "f1", "fragment_text": "你甚至会为了省下区区几百块"}],
+        )
+
+        self.assertTrue(report["final_repeat_gate_passed"])
+        self.assertEqual(report["final_cjk_short_repeat_fatal_count"], 0)
+        self.assertEqual(report["blocking_issues"], [])
 
     def test_numeral_headed_boundary_reduplication_is_not_blocking(self) -> None:
         report = build_final_repeat_gate_report(

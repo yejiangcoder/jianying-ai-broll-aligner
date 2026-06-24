@@ -11,9 +11,11 @@ from aroll_v21 import ArollEngine, ArollRunInput
 from aroll_v21.decision import (
     SemanticAdjudicationDecision,
     SemanticAdjudicationDecisionType,
+    SemanticAdjudicationRequest,
     SemanticDecisionPlanner,
     SemanticDecisionsJsonPlanner,
 )
+from aroll_v21.decision.semantic_adjudication import request_from_cluster
 from aroll_v21.evidence import CandidateEvidenceBuilder
 from aroll_v21.ingest import DraftIngest
 from aroll_v21.quality.quality_gate import build_quality_gate_report
@@ -136,7 +138,7 @@ def _write_deepseek_config(path: Path) -> None:
                 "app:",
                 "  ai:",
                 "    semantic:",
-                "      model: deepseek-chat",
+                "      model: deepseek-v4-pro",
             ]
         ),
         "utf-8",
@@ -269,6 +271,34 @@ class ArollV21SemanticAdjudicationLayerTests(unittest.TestCase):
         self.assertEqual(plan.decisions, [])
         self.assertEqual(plan.semantic_unresolved_count, 1)
         self.assertIn("V21_SELF_REPAIR_ABORTED_PHRASE_UNRESOLVED", [blocker.code for blocker in plan.blockers])
+
+    def test_self_repair_request_allows_dropping_bad_right_side(self) -> None:
+        request = request_from_cluster(_self_repair_clusters()[0])
+
+        self.assertIn(SemanticAdjudicationDecisionType.DROP_RIGHT.value, request.allowed_decisions)
+
+    def test_self_repair_provider_drop_right_keeps_left_side(self) -> None:
+        class DropRightProvider:
+            provider_name = "drop_right_provider"
+
+            def decide(self, requests: list[SemanticAdjudicationRequest]) -> list[SemanticAdjudicationDecision]:
+                return [
+                    SemanticAdjudicationDecision(
+                        issue_id=request.issue_id,
+                        decision=SemanticAdjudicationDecisionType.DROP_RIGHT,
+                        reason="right side is likely ASR garbage, keep the left phrase",
+                        confidence=0.82,
+                        provider_name=self.provider_name,
+                    )
+                    for request in requests
+                ]
+
+        clusters = _self_repair_clusters()
+        plan = SemanticDecisionPlanner(semantic_mode="deepseek", semantic_provider=DropRightProvider()).plan(clusters)
+
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.decisions[0].keep_unit_id, clusters[0].variants[0].unit_id)
+        self.assertEqual(plan.decisions[0].drop_unit_ids, [clusters[0].variants[1].unit_id])
 
     def test_self_repair_external_keep_all_rejected(self) -> None:
         clusters = _self_repair_clusters()

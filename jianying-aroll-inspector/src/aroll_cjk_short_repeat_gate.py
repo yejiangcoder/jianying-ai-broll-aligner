@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from aroll_v21.quality.boundary_overlap import is_semantic_label_reuse_boundary
-
 
 MAX_OVERLAP_CHARS = 8
 MIN_FATAL_OVERLAP_CHARS = 2
@@ -14,9 +12,12 @@ _TEXT_SPLIT_RE = re.compile(r"[\s,，.。!！?？;；:：、]+")
 _PRONOUNS = set("\u6211\u4f60\u4ed6\u5979\u5b83\u8fd9\u90a3")
 _CONNECTORS = set("\u5c31\u4f1a\u53c8\u4e5f\u8fd8\u518d\u90fd\u624d\u8981\u60f3\u80fd\u8be5")
 _SINGLE_CHAR_REPEATABLE = _PRONOUNS | _CONNECTORS
-_CJK_NUMERAL_CHARS = set("\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u4e24\u51e0\u534a0123456789")
+_CJK_NUMERAL_CHARS = set("\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u4ebf\u4e24\u51e0\u534a0123456789")
 _REDUPLICATION_MODIFIER_SUFFIXES = ("的", "地", "得")
 _MAX_PROTECTED_MODIFIER_REDUPLICATION_CHARS = 4
+_REDUPLICATION_AMOUNT_UNITS = set("\u4e2a\u53ea\u4ef6\u53f0\u90e8\u676f\u74f6\u4efd\u6b21\u5757\u5143\u6bdb\u89d2\u5206\u94b1\u4e07\u5343\u767e\u5341\u4ebf\u5e74\u6708\u5929\u5c0f\u65f6\u5206\u949f\u516c\u91cc\u7c73\u65a4\u514b\u5c81\u5e73")
+_LABEL_INTRODUCERS = ("叫做", "称为", "称作", "叫", "算作", "属于", "是")
+_DEFINITIONAL_CONNECTORS = ("等于", "就是", "指的是", "意味着", "是", "叫做", "叫")
 
 
 def _row_text(row: dict[str, Any]) -> str:
@@ -107,7 +108,38 @@ def _is_modifier_reduplication(normalized: str, start: int, size: int, phrase: s
         return False
     if normalized[start:end] != phrase + phrase:
         return False
-    return end < len(normalized) and normalized[end] in _REDUPLICATION_MODIFIER_SUFFIXES
+    if end >= len(normalized):
+        return False
+    following = normalized[end : end + 8]
+    if following.startswith(_REDUPLICATION_MODIFIER_SUFFIXES):
+        return True
+    if len(phrase) == 1 and phrase in _SINGLE_CHAR_REPEATABLE:
+        return False
+    return _looks_like_quantity_or_amount_follow(following)
+
+
+def _looks_like_quantity_or_amount_follow(following: str) -> bool:
+    if not following or following[0] not in _CJK_NUMERAL_CHARS:
+        return False
+    tail = following[1:8]
+    if not tail:
+        return False
+    return any(char in _REDUPLICATION_AMOUNT_UNITS for char in tail)
+
+
+def is_semantic_label_reuse_boundary(left_text: str, right_text: str, overlap_text: str) -> bool:
+    overlap = _cjk_only(str(overlap_text or ""))
+    if len(overlap) < 2:
+        return False
+    left = _cjk_only(str(left_text or ""))
+    right = _cjk_only(str(right_text or ""))
+    if not left.endswith(overlap) or not right.startswith(overlap):
+        return False
+    left_prefix = left[: -len(overlap)]
+    right_suffix = right[len(overlap) :]
+    if not any(left_prefix.endswith(marker) for marker in _LABEL_INTRODUCERS):
+        return False
+    return any(right_suffix.startswith(marker) for marker in _DEFINITIONAL_CONNECTORS)
 
 
 def _candidate(

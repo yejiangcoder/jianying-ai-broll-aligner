@@ -228,8 +228,11 @@ def _drop_restart_repeat_word_span(
 ) -> _RepairStep | None:
     pattern = str(candidate.get("pattern") or "")
     repair_reason_by_pattern = {
+        "internal_prefix_restart": "internal_prefix_restart_repair",
+        "abandoned_clause_restart": "abandoned_clause_restart_repair",
         "negative_predicate_restart": "negative_predicate_restart_repair",
         "partial_phrase_restart": "partial_phrase_restart_repair",
+        "partial_phrase_restart_tail_mismatch": "partial_phrase_restart_repair",
     }
     repair_reason = repair_reason_by_pattern.get(pattern)
     if repair_reason is None:
@@ -237,6 +240,9 @@ def _drop_restart_repeat_word_span(
         return no_step
     drop_text = normalize_text(str(candidate.get("drop_text") or ""))
     if not drop_text:
+        no_step: _RepairStep | None = None
+        return no_step
+    if pattern == "internal_prefix_restart" and normalize_text(str(candidate.get("text") or "")).startswith(drop_text):
         no_step: _RepairStep | None = None
         return no_step
     window_captions = _candidate_window_captions(captions, candidate)
@@ -263,7 +269,7 @@ def _drop_restart_repeat_word_span(
         timeline_changed=True,
         action=_action(
             "restart_repeat_visible",
-            "drop_partial_phrase_restart_span" if pattern == "partial_phrase_restart" else "drop_negative_predicate_restart_span",
+            _restart_repeat_drop_decision(pattern),
             pass_index,
             candidate,
             affected_caption_ids=[caption.caption_id for caption in window_captions],
@@ -271,6 +277,16 @@ def _drop_restart_repeat_word_span(
             drop_text=drop_text,
         ),
     )
+
+
+def _restart_repeat_drop_decision(pattern: str) -> str:
+    if pattern == "negative_predicate_restart":
+        return "drop_negative_predicate_restart_span"
+    if pattern == "abandoned_clause_restart":
+        return "drop_abandoned_clause_restart_span"
+    if pattern == "internal_prefix_restart":
+        return "drop_internal_prefix_restart_span"
+    return "drop_partial_phrase_restart_span"
 
 
 def _partial_previous_tail_match(

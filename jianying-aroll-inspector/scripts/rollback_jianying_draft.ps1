@@ -142,6 +142,23 @@ function Move-ToQuarantine([string]$Source, [string]$SourceRoot, [string]$Quaran
   return [pscustomobject]@{ From = $Source; To = $destination; Action = "move" }
 }
 
+function New-UniqueRollbackRunDir([string]$Root) {
+  New-Item -ItemType Directory -Force -Path $Root | Out-Null
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd_HHmmss_fff")
+    $randomSuffix = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $candidate = Join-Path $Root ("draft_rollback_{0}_pid{1}_{2}" -f $timestamp, $PID, $randomSuffix)
+    try {
+      New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
+      return (Resolve-Path -LiteralPath $candidate).Path
+    } catch [System.IO.IOException] {
+      Start-Sleep -Milliseconds 10
+      continue
+    }
+  }
+  throw "Failed to allocate a unique rollback run directory under $Root"
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $analyzer = Join-Path $repoRoot "tools\jianying_draft_rollback_analyzer.py"
 if (-not (Test-Path -LiteralPath $analyzer)) {
@@ -163,10 +180,8 @@ if (-not (Test-Path -LiteralPath $backupRoot)) {
   throw "Draft backup directory does not exist: $backupRoot"
 }
 
-$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDir = Join-Path $RunRoot ("draft_rollback_" + $timestamp)
-New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-$runDirResolved = (Resolve-Path -LiteralPath $runDir).Path
+$runDirResolved = New-UniqueRollbackRunDir -Root $RunRoot
+$runDir = $runDirResolved
 
 $env:PYTHONPATH = Join-Path $repoRoot "src"
 $env:JY_DRAFTC = $jyDraftcResolved

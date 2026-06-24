@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import re
 from typing import Any, Literal
 
 from aroll_text_normalize import normalize_text
@@ -18,6 +19,8 @@ SemanticJunkType = Literal[
     "asr_malformed_phrase",
     "prefix_restart",
     "standalone_topic_prefix_restart",
+    "lookahead_contained_short_fragment",
+    "lookahead_nominal_restart_fragment",
 ]
 SemanticJunkAction = Literal["keep", "drop_fragment", "merge_with_next", "trim_prefix", "human_review"]
 
@@ -36,6 +39,14 @@ MAX_REORDERED_RESTART_LEFT_CHARS = 14
 MIN_REORDERED_RESTART_RIGHT_EXTRA_CHARS = 2
 MIN_REORDERED_RESTART_SHARED_CHARS = 3
 MIN_REORDERED_RESTART_PREFIX_OVERLAP = 0.55
+MAX_LOOKAHEAD_RESTART_CAPTIONS = 3
+MAX_LOOKAHEAD_RESTART_TARGET_GAP_US = 6_500_000
+MAX_LOOKAHEAD_CONTAINED_FRAGMENT_CHARS = 8
+MAX_LOOKAHEAD_NOMINAL_FRAGMENT_CHARS = 12
+MIN_LOOKAHEAD_NOMINAL_HEAD_CHARS = 2
+MAX_ABANDONED_SOURCE_PREFIX_GAP_US = 700_000
+MAX_ABANDONED_SOURCE_RESTART_GAP_US = 900_000
+MIN_ABANDONED_SOURCE_CONTEXT_CHARS = 3
 
 ABORTED_RESTART_TAILS = (
     "第一",
@@ -76,6 +87,35 @@ VAGUE_DIRECTIONAL_TAILS = (
     "下来",
 )
 SPECIFIC_CONTEXT_STARTS = ("这", "那", "某", "一", "个", "场", "环境", "地方", "里面", "里", "上", "下")
+PREDICATE_AFTER_NOMINAL_PREFIXES = (
+    "就",
+    "会",
+    "能",
+    "可以",
+    "已经",
+    "正在",
+    "开始",
+    "变成",
+    "成为",
+    "是",
+    "在",
+    "被",
+    "让",
+    "把",
+    "要",
+    "想",
+)
+NOMINAL_FRAGMENT_VERB_MARKERS = (
+    "就是",
+    "已经",
+    "正在",
+    "开始",
+    "变成",
+    "成为",
+    "可以",
+)
+NOMINAL_COMPLETION_CONNECTORS = ("叫做", "称为", "称作", "属于", "算作", "等于", "就是", "是", "叫")
+MAX_NOMINAL_COMPLETION_PREFIX_CHARS = 4
 
 
 @dataclass(frozen=True)
@@ -149,6 +189,8 @@ def detect_pre_visible_semantic_junk_candidates(
         next_rows = ordered[index + 1 : min(len(ordered), index + 1 + MAX_CONTEXT_CAPTIONS)]
         builders = [
             _standalone_topic_prefix_restart_candidate,
+            _lookahead_contained_short_fragment_candidate,
+            _lookahead_nominal_restart_fragment_candidate,
             _adjacent_suffix_semantic_recurrence_candidate,
             _adjacent_reordered_semantic_restart_candidate,
             _aborted_restart_candidate,
@@ -165,6 +207,131 @@ def detect_pre_visible_semantic_junk_candidates(
                 candidates.append(candidate)
                 break
     return candidates
+
+
+def _lookahead_contained_short_fragment_candidate(
+    ordered: list[CaptionRenderUnit],
+    index: int,
+    *,
+    previous_rows: list[CaptionRenderUnit],
+    next_rows: list[CaptionRenderUnit],
+    source_graph: CanonicalSourceGraph,
+) -> SemanticJunkCandidate | None:
+    caption = ordered[index]
+    text = normalize_text(caption.text)
+    if not _looks_like_lookahead_contained_short_fragment(caption, text):
+        no_candidate: SemanticJunkCandidate | None = None
+        return no_candidate
+    if not _has_unselected_source_prefix_before_caption(caption, ordered, source_graph):
+        no_candidate: SemanticJunkCandidate | None = None
+        return no_candidate
+    for related in _lookahead_rows(ordered, index):
+        related_text = normalize_text(related.text)
+        if not related_text or related_text == text:
+            continue
+        if text not in related_text:
+            continue
+        if len(related_text) < len(text) + 4:
+            continue
+        if not _target_gap_within(caption, related, MAX_LOOKAHEAD_RESTART_TARGET_GAP_US):
+            continue
+        if is_explanatory_term_reuse(text, related_text) or is_explanatory_term_reuse(related_text, text):
+            continue
+        return _candidate(
+            ordered,
+            index,
+            source_graph=source_graph,
+            candidate_type="lookahead_contained_short_fragment",
+            proposed_action="drop_fragment",
+            local_confidence=0.98,
+            evidence={
+                "reason": "standalone short source tail is contained by a nearby longer completed caption",
+                "shared_core_text": text,
+                "related_caption_id": related.caption_id,
+                "related_caption_text": related.text,
+                "target_gap_us": int(related.target_start_us) - int(caption.target_end_us),
+            },
+            provider_required=False,
+            safety_tags=["no_rewrite", "drop_audio_and_caption_together", "lookahead_contained_short_fragment"],
+            previous_rows=previous_rows,
+            next_rows=next_rows,
+        )
+    no_candidate: SemanticJunkCandidate | None = None
+    return no_candidate
+
+
+def _lookahead_nominal_restart_fragment_candidate(
+    ordered: list[CaptionRenderUnit],
+    index: int,
+    *,
+    previous_rows: list[CaptionRenderUnit],
+    next_rows: list[CaptionRenderUnit],
+    source_graph: CanonicalSourceGraph,
+) -> SemanticJunkCandidate | None:
+    caption = ordered[index]
+    text = normalize_text(caption.text)
+    head = _nominal_restart_head(text)
+    if not head:
+        no_candidate: SemanticJunkCandidate | None = None
+        return no_candidate
+    if not _has_unselected_source_restart_after_caption(caption, ordered, source_graph):
+        no_candidate: SemanticJunkCandidate | None = None
+        return no_candidate
+    for related in _lookahead_rows(ordered, index):
+        related_text = normalize_text(related.text)
+        if not related_text or related_text == text:
+            continue
+        if head not in related_text:
+            continue
+        if not _target_gap_within(caption, related, MAX_LOOKAHEAD_RESTART_TARGET_GAP_US):
+            continue
+        if not _related_completes_nominal_head(head, related_text):
+            continue
+        if is_semantic_label_reuse_boundary(text, related_text, head):
+            continue
+        if is_explanatory_term_reuse(text, related_text) or is_explanatory_term_reuse(related_text, text):
+            continue
+        if _is_previous_context_nominal_completion(ordered, index, text, head):
+            return _candidate(
+                ordered,
+                index,
+                source_graph=source_graph,
+                candidate_type="lookahead_nominal_restart_fragment",
+                proposed_action="keep",
+                local_confidence=0.0,
+                evidence={
+                    "reason": "nominal fragment completes the previous predicate or identity clause",
+                    "shared_head_text": head,
+                    "previous_caption_text": ordered[index - 1].text if index > 0 else "",
+                    "related_caption_id": related.caption_id,
+                    "related_caption_text": related.text,
+                },
+                provider_required=False,
+                safety_tags=["protected_semantic_structure", "nominal_completion_context"],
+                previous_rows=previous_rows,
+                next_rows=next_rows,
+            )
+        return _candidate(
+            ordered,
+            index,
+            source_graph=source_graph,
+            candidate_type="lookahead_nominal_restart_fragment",
+            proposed_action="drop_fragment",
+            local_confidence=0.97,
+            evidence={
+                "reason": "standalone nominal fragment is restarted by a nearby clause that contains the same head and a predicate",
+                "shared_head_text": head,
+                "related_caption_id": related.caption_id,
+                "related_caption_text": related.text,
+                "target_gap_us": int(related.target_start_us) - int(caption.target_end_us),
+            },
+            provider_required=False,
+            safety_tags=["no_rewrite", "drop_audio_and_caption_together", "lookahead_nominal_restart_fragment"],
+            previous_rows=previous_rows,
+            next_rows=next_rows,
+        )
+    no_candidate: SemanticJunkCandidate | None = None
+    return no_candidate
 
 
 def _aborted_restart_candidate(
@@ -700,6 +867,179 @@ def _looks_like_parallel_scan(text: str, next_text: str, shared: str) -> bool:
     if not left_tail or not right_tail:
         return False
     return abs(len(left_tail) - len(right_tail)) <= 3 and not _fragment_has_open_tail(text)
+
+
+def _lookahead_rows(ordered: list[CaptionRenderUnit], index: int) -> list[CaptionRenderUnit]:
+    return ordered[index + 1 : min(len(ordered), index + 1 + MAX_LOOKAHEAD_RESTART_CAPTIONS)]
+
+
+def _target_gap_within(left: CaptionRenderUnit, right: CaptionRenderUnit, max_gap_us: int) -> bool:
+    gap_us = int(right.target_start_us) - int(left.target_end_us)
+    return -80_000 <= gap_us <= max_gap_us
+
+
+def _looks_like_lookahead_contained_short_fragment(caption: CaptionRenderUnit, text: str) -> bool:
+    if not text or len(text) > MAX_LOOKAHEAD_CONTAINED_FRAGMENT_CHARS:
+        return False
+    duration_us = int(caption.target_end_us) - int(caption.target_start_us)
+    if duration_us > MAX_ABORTED_RESTART_DURATION_US:
+        return False
+    if _cjk_char_count(text) == len(text):
+        return 2 <= len(text) <= MAX_STANDALONE_TOPIC_CHARS
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{1,7}", text))
+
+
+def _nominal_restart_head(text: str) -> str:
+    if not text or len(text) > MAX_LOOKAHEAD_NOMINAL_FRAGMENT_CHARS:
+        return ""
+    if _cjk_char_count(text) != len(text):
+        return ""
+    if any(marker in text for marker in NOMINAL_FRAGMENT_VERB_MARKERS):
+        return ""
+    head = ""
+    for particle in ("的", "地", "得"):
+        if particle in text:
+            head = text.rsplit(particle, 1)[-1]
+            break
+    if not head:
+        head = text[-4:]
+    if len(head) < MIN_LOOKAHEAD_NOMINAL_HEAD_CHARS:
+        return ""
+    if not all("\u4e00" <= char <= "\u9fff" for char in head):
+        return ""
+    return head
+
+
+def _is_previous_context_nominal_completion(
+    ordered: list[CaptionRenderUnit],
+    index: int,
+    text: str,
+    head: str,
+) -> bool:
+    if index <= 0 or not text or not head:
+        return False
+    caption = ordered[index]
+    previous = ordered[index - 1]
+    if not _target_adjacent(previous, caption):
+        return False
+    previous_text = normalize_text(previous.text)
+    if not previous_text:
+        return False
+    marker_row = _rightmost_nominal_completion_marker(previous_text)
+    if marker_row is None:
+        return False
+    marker, marker_index = marker_row
+    subject_text = previous_text[:marker_index]
+    complement_prefix = previous_text[marker_index + len(marker) :]
+    if not subject_text:
+        return False
+    if len(complement_prefix) > MAX_NOMINAL_COMPLETION_PREFIX_CHARS:
+        return False
+    if _contains_action_pivot(complement_prefix):
+        return False
+    complement_text = complement_prefix + text
+    if len(complement_text) < len(text):
+        return False
+    if head not in complement_text:
+        return False
+    return complement_text.endswith(head) or complement_text.endswith(("的" + head, "地" + head, "得" + head))
+
+
+def _rightmost_nominal_completion_marker(text: str) -> tuple[str, int] | None:
+    best_marker = ""
+    best_index = -1
+    for marker in NOMINAL_COMPLETION_CONNECTORS:
+        marker_index = text.rfind(marker)
+        if marker_index < 0:
+            continue
+        if marker_index > best_index or (marker_index == best_index and len(marker) > len(best_marker)):
+            best_marker = marker
+            best_index = marker_index
+    if best_index < 0:
+        no_marker: tuple[str, int] | None = None
+        return no_marker
+    return best_marker, best_index
+
+
+def _related_completes_nominal_head(head: str, related_text: str) -> bool:
+    head_index = related_text.find(head)
+    if head_index < 0:
+        return False
+    after = related_text[head_index + len(head) :]
+    if not after:
+        return False
+    return after.startswith(PREDICATE_AFTER_NOMINAL_PREFIXES) or _contains_action_pivot(after[:6])
+
+
+def _has_unselected_source_prefix_before_caption(
+    caption: CaptionRenderUnit,
+    ordered: list[CaptionRenderUnit],
+    source_graph: CanonicalSourceGraph,
+) -> bool:
+    word_indexes = _source_word_indexes(caption, source_graph)
+    if not word_indexes:
+        return False
+    first_index = min(word_indexes)
+    selected_word_ids = _selected_word_ids(ordered)
+    source_words = list(source_graph.words)
+    if first_index <= 0:
+        return False
+    cursor_start_us = int(source_words[first_index].source_start_us)
+    collected: list[str] = []
+    for source_index in range(first_index - 1, -1, -1):
+        word = source_words[source_index]
+        if str(word.word_id) in selected_word_ids:
+            break
+        gap_us = cursor_start_us - int(word.source_end_us)
+        if gap_us < 0 or gap_us > MAX_ABANDONED_SOURCE_PREFIX_GAP_US:
+            break
+        collected.append(normalize_text(str(word.text or "")))
+        cursor_start_us = int(word.source_start_us)
+        if len("".join(reversed(collected))) >= MIN_ABANDONED_SOURCE_CONTEXT_CHARS:
+            return True
+    return False
+
+
+def _has_unselected_source_restart_after_caption(
+    caption: CaptionRenderUnit,
+    ordered: list[CaptionRenderUnit],
+    source_graph: CanonicalSourceGraph,
+) -> bool:
+    word_indexes = _source_word_indexes(caption, source_graph)
+    if not word_indexes:
+        return False
+    last_index = max(word_indexes)
+    selected_word_ids = _selected_word_ids(ordered)
+    source_words = list(source_graph.words)
+    if last_index + 1 >= len(source_words):
+        return False
+    previous_end_us = int(source_words[last_index].source_end_us)
+    collected = ""
+    for source_index in range(last_index + 1, len(source_words)):
+        word = source_words[source_index]
+        gap_us = int(word.source_start_us) - previous_end_us
+        if gap_us < 0 or gap_us > MAX_ABANDONED_SOURCE_RESTART_GAP_US:
+            break
+        if str(word.word_id) in selected_word_ids:
+            break
+        collected += normalize_text(str(word.text or ""))
+        previous_end_us = int(word.source_end_us)
+        if len(collected) >= MIN_ABANDONED_SOURCE_CONTEXT_CHARS:
+            return True
+    return False
+
+
+def _selected_word_ids(ordered: list[CaptionRenderUnit]) -> set[str]:
+    return {str(word_id) for caption in ordered for word_id in caption.word_ids if str(word_id)}
+
+
+def _source_word_indexes(caption: CaptionRenderUnit, source_graph: CanonicalSourceGraph) -> list[int]:
+    wanted = {str(word_id) for word_id in caption.word_ids if str(word_id)}
+    indexes: list[int] = []
+    for index, word in enumerate(source_graph.words):
+        if str(word.word_id) in wanted:
+            indexes.append(index)
+    return indexes
 
 
 def _longest_common_substring(left: str, right: str) -> str:

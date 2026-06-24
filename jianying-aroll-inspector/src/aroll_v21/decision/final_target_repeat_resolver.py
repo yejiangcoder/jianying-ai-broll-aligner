@@ -629,6 +629,8 @@ class FinalTargetRepeatResolver:
         for payload in decision_plan.semantic_request_payloads:
             if not isinstance(payload, dict):
                 continue
+            if not self._is_final_target_repeat_payload(payload):
+                continue
             payload_id = str(payload.get("cluster_id") or payload.get("issue_id") or "")
             if not payload_id:
                 continue
@@ -641,6 +643,11 @@ class FinalTargetRepeatResolver:
             matched["_matched_request_cluster_id"] = payload_id
             return matched
         return None
+
+    def _is_final_target_repeat_payload(self, payload: dict[str, Any]) -> bool:
+        payload_type = str(payload.get("type") or "")
+        payload_id = str(payload.get("cluster_id") or payload.get("issue_id") or "")
+        return payload_type == "final_target_repeat" or payload_id.startswith("final_target_repeat_")
 
     def _cluster_text_pair(self, cluster: dict[str, Any]) -> tuple[str, str] | None:
         items = [item for item in list(cluster.get("items") or []) if isinstance(item, dict)]

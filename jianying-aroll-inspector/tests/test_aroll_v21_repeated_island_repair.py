@@ -144,6 +144,94 @@ def test_repeated_island_high_confidence_repair_drops_first_island_and_keeps_sec
     assert result.report["repeated_island_repair_action_count"] == 1
 
 
+def test_repeated_island_source_boundary_restart_drops_abandoned_middle_fragment() -> None:
+    graph = _graph_for_tokens(["他", "说", "需要", "旧方案", "需要", "新方案"])
+    words = [
+        replace(word, subtitle_uid="s_intro", subtitle_index=1)
+        if index < 2
+        else replace(word, subtitle_uid="s_aborted", subtitle_index=2)
+        if index < 4
+        else replace(word, subtitle_uid="s_restart", subtitle_index=3)
+        for index, word in enumerate(graph.words)
+    ]
+    graph = replace(graph, words=words)
+    timeline = [_single_segment(graph)]
+    renderer = SubtitleRenderer()
+
+    proposals = build_repeated_island_proposals(timeline, graph)
+
+    assert len(proposals) == 1
+    assert proposals[0].target_word_ids == ["w003", "w004"]
+    assert proposals[0].target_text == "需要旧方案"
+    assert proposals[0].evidence["proposal_policy"] == "drop_first_island_and_middle_fragment_keep_source_boundary_restart"
+
+    result = repair_final_visible_caption_issues(
+        final_timeline=timeline,
+        captions=renderer.render(timeline, graph),
+        source_graph=graph,
+        render_captions=lambda rows: renderer.render(rows, graph),
+    )
+
+    repaired_text = "".join(segment.text for segment in result.final_timeline)
+    assert repaired_text == "他说需要新方案"
+    actions = [action for action in result.report["final_visible_repair_actions"] if action["issue_type"] == "repeated_island"]
+    assert actions[0]["target_word_ids"] == ["w003", "w004"]
+
+
+def test_repeated_island_replay_repairs_middle_fragment_after_prior_island_drop() -> None:
+    graph = _graph_for_tokens(["他", "说", "需要", "旧方案", "需要", "新方案"])
+    words = [
+        replace(word, subtitle_uid="s_intro", subtitle_index=1)
+        if index < 2
+        else replace(word, subtitle_uid="s_aborted", subtitle_index=2)
+        if index < 4
+        else replace(word, subtitle_uid="s_restart", subtitle_index=3)
+        for index, word in enumerate(graph.words)
+    ]
+    graph = replace(graph, words=words)
+    base = _single_segment(graph)
+    timeline = [
+        replace(
+            base,
+            segment_id="v21_seg_000001",
+            source_start_us=0,
+            source_end_us=400_000,
+            target_start_us=0,
+            target_end_us=400_000,
+            word_ids=["w001", "w002"],
+            text="他说",
+        ),
+        replace(
+            base,
+            segment_id="v21_seg_000002",
+            source_start_us=600_000,
+            source_end_us=1_200_000,
+            target_start_us=400_000,
+            target_end_us=1_000_000,
+            word_ids=["w004", "w005", "w006"],
+            text="旧方案需要新方案",
+        ),
+    ]
+    renderer = SubtitleRenderer()
+
+    proposals = build_repeated_island_proposals(timeline, graph)
+
+    assert len(proposals) == 1
+    assert proposals[0].target_word_ids == ["w004"]
+    assert proposals[0].target_text == "旧方案"
+    assert proposals[0].evidence["proposal_policy"] == "trim_abandoned_middle_fragment_left_after_prior_restart_island_drop"
+
+    result = repair_final_visible_caption_issues(
+        final_timeline=timeline,
+        captions=renderer.render(timeline, graph),
+        source_graph=graph,
+        render_captions=lambda rows: renderer.render(rows, graph),
+    )
+
+    repaired_text = "".join(segment.text for segment in result.final_timeline)
+    assert repaired_text == "他说需要新方案"
+
+
 def test_repeated_island_repair_rerenders_and_preserves_caption_word_coverage() -> None:
     graph, timeline = _high_confidence_fixture()
     renderer = SubtitleRenderer()

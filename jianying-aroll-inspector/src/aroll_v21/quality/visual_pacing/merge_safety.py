@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from typing import Any
 
 from aroll_v21.ir.models import CanonicalSourceGraph, FinalTimelineSegment
+
+_WORD_RANGE_INDEX_CACHE: dict[int, tuple[tuple[int, int], list[tuple[int, int, int, Any]], list[int], int]] = {}
+_WORD_RANGE_INDEX_CACHE_MAX = 16
+
 
 def _child_segment_records(
     segment: FinalTimelineSegment,
@@ -67,13 +72,44 @@ def _words_overlapping_range(
     if end_us <= start_us:
         no_words: list[Any] = []
         return no_words
+    indexed_words, starts, max_duration_us = _indexed_words_by_source_start(source_graph)
+    lower_bound = bisect_left(starts, int(start_us) - max_duration_us)
+    upper_bound = bisect_left(starts, int(end_us))
     return [
-        word
-        for word in source_graph.words
-        if word.word_id not in child_word_ids
-        and int(word.source_end_us) > int(start_us)
-        and int(word.source_start_us) < int(end_us)
+        row[3]
+        for row in indexed_words[lower_bound:upper_bound]
+        if str(getattr(row[3], "word_id", "") or "") not in child_word_ids
+        and row[2] > int(start_us)
+        and row[1] < int(end_us)
     ]
+
+
+def _indexed_words_by_source_start(source_graph: CanonicalSourceGraph) -> tuple[list[tuple[int, int, int, Any]], list[int], int]:
+    words = list(source_graph.words)
+    signature = (id(source_graph.words), len(words))
+    cache_key = id(source_graph)
+    cached = _WORD_RANGE_INDEX_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1], cached[2], cached[3]
+    rows = sorted(
+        (
+            (
+                index,
+                int(getattr(word, "source_start_us", 0) or 0),
+                int(getattr(word, "source_end_us", 0) or 0),
+                word,
+            )
+            for index, word in enumerate(words)
+        ),
+        key=lambda row: (row[1], row[2], row[0]),
+    )
+    starts = [row[1] for row in rows]
+    max_duration_us = max([max(0, row[2] - row[1]) for row in rows] or [0])
+    _WORD_RANGE_INDEX_CACHE[cache_key] = (signature, rows, starts, max_duration_us)
+    if len(_WORD_RANGE_INDEX_CACHE) > _WORD_RANGE_INDEX_CACHE_MAX:
+        oldest_key = next(iter(_WORD_RANGE_INDEX_CACHE))
+        _WORD_RANGE_INDEX_CACHE.pop(oldest_key, None)
+    return rows, starts, max_duration_us
 
 
 def _dropped_segment_ids_for_words(words: list[Any]) -> list[str]:
@@ -100,3 +136,4 @@ def _dropped_cluster_ids_for_words(words: list[Any]) -> list[str]:
             if value:
                 cluster_ids.add(value)
     return sorted(cluster_ids)
+

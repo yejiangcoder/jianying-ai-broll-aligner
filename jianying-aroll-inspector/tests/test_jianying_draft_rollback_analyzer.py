@@ -93,6 +93,16 @@ class JianyingDraftRollbackAnalyzerTests(unittest.TestCase):
         self.assertIn("-not $expectedSourceMediaRootResolved -and -not $Force", script)
         self.assertIn("Rollback Apply requires -ExpectedSourceMediaRoot", script)
 
+    def test_rollback_run_dir_uses_atomic_unique_directory_allocation(self) -> None:
+        script = (ROOT / "scripts" / "rollback_jianying_draft.ps1").read_text("utf-8")
+        self.assertIn("function New-UniqueRollbackRunDir", script)
+        self.assertIn('ToString("yyyyMMdd_HHmmss_fff")', script)
+        self.assertIn("$PID", script)
+        self.assertIn("[Guid]::NewGuid()", script)
+        self.assertIn("New-Item -ItemType Directory -Path $candidate -ErrorAction Stop", script)
+        self.assertNotIn('Get-Date -Format "yyyyMMdd_HHmmss"', script)
+        self.assertNotIn('New-Item -ItemType Directory -Force -Path $runDir', script)
+
 
 if __name__ == "__main__":
     unittest.main()

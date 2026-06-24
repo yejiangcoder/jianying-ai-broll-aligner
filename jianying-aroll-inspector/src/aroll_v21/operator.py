@@ -493,3 +493,4 @@ def run_operator(config: ArollV21OperatorConfig) -> dict[str, Any]:
         runtime_metadata=runtime_metadata,
         stage_timings=stage_timings,
     )
+

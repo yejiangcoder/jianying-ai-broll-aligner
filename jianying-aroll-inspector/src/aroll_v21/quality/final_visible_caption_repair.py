@@ -268,6 +268,35 @@ def repair_final_visible_caption_issues(
             current_signature = next_signature
             continue
 
+        subject_prefix_restart_step = _repair_subject_prefix_completed_predicate_restart(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if subject_prefix_restart_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(subject_prefix_restart_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(subject_prefix_restart_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": subject_prefix_restart_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
         pre_semantic_junk_step = _repair_pre_visible_semantic_junk_candidate(
             final_timeline=current_timeline,
             captions=current_captions,
@@ -291,6 +320,35 @@ def repair_final_visible_caption_issues(
                         "pass_index": pass_index + 1,
                         "reason": stop_reason,
                         "last_action": pre_semantic_junk_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        omitted_reduplication_step = _repair_omitted_legal_reduplication_word(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if omitted_reduplication_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(omitted_reduplication_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(omitted_reduplication_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": omitted_reduplication_step.action,
                     }
                 )
                 break
@@ -349,6 +407,35 @@ def repair_final_visible_caption_issues(
                         "pass_index": pass_index + 1,
                         "reason": stop_reason,
                         "last_action": compound_step.action,
+                    }
+                )
+                break
+            seen_signatures.add(next_signature)
+            current_signature = next_signature
+            continue
+
+        truncated_tail_step = _repair_source_boundary_truncated_compound_tail(
+            final_timeline=current_timeline,
+            source_graph=source_graph,
+            pass_index=pass_index + 1,
+        )
+        if truncated_tail_step is not None:
+            previous_captions = current_captions
+            current_timeline = _repack_timeline(truncated_tail_step.final_timeline)
+            current_captions = _render_captions_preserving_caption_only_materializations(
+                current_timeline,
+                previous_captions,
+                render_captions,
+            )
+            actions.append(truncated_tail_step.action)
+            next_signature = _repair_state_signature(current_timeline, current_captions)
+            if next_signature == current_signature or next_signature in seen_signatures:
+                stop_reason = "no_progress_detected"
+                unresolved.append(
+                    {
+                        "pass_index": pass_index + 1,
+                        "reason": stop_reason,
+                        "last_action": truncated_tail_step.action,
                     }
                 )
                 break
@@ -713,6 +800,13 @@ def repair_final_visible_caption_issues(
         pass_index_start=len(actions) + 1,
     )
     actions.extend(final_caption_only_actions)
+    current_captions, subject_prefix_caption_actions = _finalize_subject_prefix_completed_predicate_caption_merges(
+        current_captions,
+        final_timeline=current_timeline,
+        source_graph=source_graph,
+        pass_index_start=len(actions) + 1,
+    )
+    actions.extend(subject_prefix_caption_actions)
 
     final_gate = build_final_caption_visible_repeat_gate(current_captions)
     final_semantic_junk_report = build_pre_visible_semantic_junk_candidate_report(current_captions, source_graph)
@@ -1679,6 +1773,7 @@ def _repair_semantic_integrity_issue(
         "single_char_false_start_tail",
         "truncated_nominal_prefix_tail",
         "dangling_discourse_connector_tail",
+        "dangling_discourse_pronoun_tail",
         "incomplete_lexical_tail",
         "local_recurrence_with_open_tail",
     }:
@@ -1764,6 +1859,26 @@ def _repair_dangling_prefix_suffix(
     )
     if same_segment_de_duplicate is not None:
         return same_segment_de_duplicate
+    if str(candidate.get("reason") or "") == "dangling_weak_pronoun_fragment":
+        dropped = _drop_or_trim_caption_words(final_timeline, captions, source_graph, current)
+        if dropped is None:
+            no_step: _RepairStep | None = None
+            return no_step
+        repaired_timeline, dropped_segment_ids, trimmed_segment_ids = dropped
+        return _RepairStep(
+            final_timeline=repaired_timeline,
+            captions=[],
+            timeline_changed=True,
+            action=_action(
+                "dangling_prefix_suffix",
+                "drop_dangling_weak_pronoun_fragment",
+                pass_index,
+                candidate,
+                affected_caption_ids=[current.caption_id],
+                dropped_segment_ids=dropped_segment_ids,
+                trimmed_segment_ids=trimmed_segment_ids,
+            ),
+        )
     if index == 0:
         no_step: _RepairStep | None = None
         return no_step
@@ -2061,6 +2176,83 @@ def _source_range_has_unselected_words(
     return False
 
 
+def _source_bounds_for_word_ids(
+    word_ids: list[str],
+    source_graph: CanonicalSourceGraph,
+) -> tuple[int, int] | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    words = [words_by_id[word_id] for word_id in word_ids if word_id in words_by_id]
+    if not words or len(words) != len(word_ids):
+        no_bounds: tuple[int, int] | None = None
+        return no_bounds
+    source_start_us = min(int(word.source_start_us) for word in words)
+    source_end_us = max(int(word.source_end_us) for word in words)
+    if source_end_us <= source_start_us:
+        no_bounds: tuple[int, int] | None = None
+        return no_bounds
+    return source_start_us, source_end_us
+
+
+def _merged_segment_pair_preserving_effective_speed(
+    left: FinalTimelineSegment,
+    right: FinalTimelineSegment,
+    source_graph: CanonicalSourceGraph,
+    repair_reason: str,
+) -> FinalTimelineSegment:
+    merged_word_ids = [*left.word_ids, *right.word_ids]
+    text = _text_from_word_ids(merged_word_ids, source_graph) or f"{left.text}{right.text}"
+    bounds = _source_bounds_for_word_ids(merged_word_ids, source_graph)
+    if bounds is None:
+        source_start_us = int(left.source_start_us)
+        source_end_us = int(right.source_end_us)
+    else:
+        source_start_us, source_end_us = bounds
+    target_duration_us = _target_duration_preserving_effective_speed(left, source_start_us, source_end_us)
+    has_clip_bounds = any(
+        value is not None
+        for value in (
+            left.clip_source_start_us,
+            left.clip_source_end_us,
+            right.clip_source_start_us,
+            right.clip_source_end_us,
+        )
+    )
+    clip_start_us = None
+    clip_end_us = None
+    if has_clip_bounds:
+        clip_start_values = [
+            int(value)
+            for value in (left.clip_source_start_us, right.clip_source_start_us, source_start_us)
+            if value is not None
+        ]
+        clip_end_values = [
+            int(value)
+            for value in (left.clip_source_end_us, right.clip_source_end_us, source_end_us)
+            if value is not None
+        ]
+        clip_start_us = min(clip_start_values) if clip_start_values else source_start_us
+        clip_end_us = max(clip_end_values) if clip_end_values else source_end_us
+    return replace(
+        left,
+        source_start_us=source_start_us,
+        source_end_us=source_end_us,
+        target_end_us=int(left.target_start_us) + target_duration_us,
+        word_ids=merged_word_ids,
+        text=text,
+        decision_ids=_unique([*left.decision_ids, *right.decision_ids]),
+        spoken_source_start_us=source_start_us,
+        spoken_source_end_us=source_end_us,
+        clip_source_start_us=clip_start_us,
+        clip_source_end_us=clip_end_us,
+        tail_handle_us=max(int(left.tail_handle_us), int(right.tail_handle_us)),
+        debug_hints={
+            **dict(left.debug_hints or {}),
+            "final_visible_repair": repair_reason,
+            "merged_segment_ids": [left.segment_id, right.segment_id],
+        },
+    )
+
+
 def _target_duration_preserving_effective_speed(
     segment: FinalTimelineSegment,
     source_start_us: int,
@@ -2247,6 +2439,7 @@ _repair_leading_filler_gap = _leading_filler_rules._repair_leading_filler_gap
 _repair_connector_single_word_intrusion = _connector_intrusion_rules._repair_connector_single_word_intrusion
 _repair_connector_filler_restart = _connector_intrusion_rules._repair_connector_filler_restart
 _repair_repeated_object_head_tail = _connector_intrusion_rules._repair_repeated_object_head_tail
+_repair_subject_prefix_completed_predicate_restart = _connector_intrusion_rules._repair_subject_prefix_completed_predicate_restart
 _repair_pre_visible_semantic_junk_candidate = _pre_visible_semantic_junk_rules._repair_pre_visible_semantic_junk_candidate
 _is_deterministic_pre_visible_semantic_junk_drop = _pre_visible_semantic_junk_rules._is_deterministic_pre_visible_semantic_junk_drop
 _repair_isolated_semantic_junk_caption = _pre_visible_semantic_junk_rules._repair_isolated_semantic_junk_caption
@@ -2254,14 +2447,17 @@ _is_isolated_short_source_gap_fragment = _pre_visible_semantic_junk_rules._is_is
 _transfer_leading_function_prefix_to_previous_caption = _source_boundary_prefix_rules._transfer_leading_function_prefix_to_previous_caption
 _target_boundary_after_leading_word = _source_boundary_prefix_rules._target_boundary_after_leading_word
 _repair_source_boundary_prefix_gap = _source_boundary_prefix_rules._repair_source_boundary_prefix_gap
+_repair_omitted_legal_reduplication_word = _source_boundary_prefix_rules._repair_omitted_legal_reduplication_word
 _source_boundary_prefix_candidate = _source_boundary_prefix_rules._source_boundary_prefix_candidate
 _repair_source_boundary_compound_suffix_gap = _source_boundary_prefix_rules._repair_source_boundary_compound_suffix_gap
+_repair_source_boundary_truncated_compound_tail = _source_boundary_prefix_rules._repair_source_boundary_truncated_compound_tail
 _source_boundary_compound_candidate = _source_boundary_prefix_rules._source_boundary_compound_candidate
 _source_boundary_compound_words_match = _source_boundary_prefix_rules._source_boundary_compound_words_match
 _merge_source_boundary_compound_segments = _source_boundary_prefix_rules._merge_source_boundary_compound_segments
 _source_boundary_prefix_dependent_start = _source_boundary_prefix_rules._source_boundary_prefix_dependent_start
 _apply_source_boundary_prefix_candidate = _source_boundary_prefix_rules._apply_source_boundary_prefix_candidate
 _finalize_caption_only_dangling_merges = _caption_only_merge_rules._finalize_caption_only_dangling_merges
+_finalize_subject_prefix_completed_predicate_caption_merges = _caption_only_merge_rules._finalize_subject_prefix_completed_predicate_caption_merges
 _repair_dangling_prefix_suffix_caption_only = _caption_only_merge_rules._repair_dangling_prefix_suffix_caption_only
 _merge_adjacent_caption_segments = _caption_only_merge_rules._merge_adjacent_caption_segments
 _merge_adjacent_captions = _caption_only_merge_rules._merge_adjacent_captions

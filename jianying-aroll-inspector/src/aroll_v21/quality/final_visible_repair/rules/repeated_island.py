@@ -33,7 +33,9 @@ class RepeatedIslandCandidate:
     segment_id: str
     island_text: str
     first_word_ids: list[str]
+    middle_word_ids: list[str]
     second_word_ids: list[str]
+    after_second_word_ids: list[str]
     middle_text: str
     after_second_text: str
     island_char_count: int
@@ -46,7 +48,9 @@ class RepeatedIslandCandidate:
             "segment_id": self.segment_id,
             "island_text": self.island_text,
             "first_word_ids": list(self.first_word_ids),
+            "middle_word_ids": list(self.middle_word_ids),
             "second_word_ids": list(self.second_word_ids),
+            "after_second_word_ids": list(self.after_second_word_ids),
             "middle_text": self.middle_text,
             "after_second_text": self.after_second_text,
             "island_char_count": int(self.island_char_count),
@@ -77,6 +81,9 @@ def build_repeated_island_proposals(
         if candidate.confidence == "high"
     ]
     for index, candidate in enumerate(high_candidates, start=1):
+        target_word_ids = _proposal_target_word_ids(candidate, source_graph)
+        target_text = text_from_word_ids(target_word_ids, source_graph)
+        source_boundary_restart = len(target_word_ids) > len(candidate.first_word_ids)
         evidence = candidate.to_evidence()
         proposals.append(
             TimelineRepairProposal(
@@ -84,18 +91,27 @@ def build_repeated_island_proposals(
                 issue_type="repeated_island",
                 confidence=0.93,
                 target_segment_id=candidate.segment_id,
-                target_word_ids=list(candidate.first_word_ids),
+                target_word_ids=target_word_ids,
                 target_source_start_us=_word_source_start_us(candidate.first_word_ids, source_graph),
-                target_source_end_us=_word_source_end_us(candidate.first_word_ids, source_graph),
-                target_text=candidate.island_text,
+                target_source_end_us=_word_source_end_us(target_word_ids, source_graph),
+                target_text=target_text,
                 repair_action="internal_drop",
-                risk_tags=["same_segment_repeated_island", "whole_word_internal_drop"],
+                risk_tags=[
+                    "same_segment_repeated_island",
+                    "whole_word_internal_drop",
+                    *(["source_boundary_abandoned_middle_fragment"] if source_boundary_restart else []),
+                ],
                 evidence={
                     **evidence,
-                    "proposal_policy": "drop_first_island_keep_second_island_and_after_text",
+                    "proposal_policy": (
+                        "drop_first_island_and_middle_fragment_keep_source_boundary_restart"
+                        if source_boundary_restart
+                        else "drop_first_island_keep_second_island_and_after_text"
+                    ),
                 },
             )
         )
+    proposals.extend(_build_abandoned_middle_fragment_residual_proposals(final_timeline, source_graph, start_index=len(proposals) + 1))
     return proposals
 
 
@@ -143,7 +159,9 @@ def _candidates_for_segment(
                     segment_id=segment.segment_id,
                     island_text=island_text,
                     first_word_ids=first_ids,
+                    middle_word_ids=middle_ids,
                     second_word_ids=second_ids,
+                    after_second_word_ids=after_ids,
                     middle_text=middle_text,
                     after_second_text=after_second_text,
                     island_char_count=island_char_count,
@@ -159,7 +177,9 @@ def _classify_candidate(
     segment_id: str,
     island_text: str,
     first_word_ids: list[str],
+    middle_word_ids: list[str],
     second_word_ids: list[str],
+    after_second_word_ids: list[str],
     middle_text: str,
     after_second_text: str,
     island_char_count: int,
@@ -197,7 +217,9 @@ def _classify_candidate(
         segment_id=segment_id,
         island_text=island_text,
         first_word_ids=list(first_word_ids),
+        middle_word_ids=list(middle_word_ids),
         second_word_ids=list(second_word_ids),
+        after_second_word_ids=list(after_second_word_ids),
         middle_text=middle_text,
         after_second_text=after_second_text,
         island_char_count=island_char_count,
@@ -247,6 +269,145 @@ def _dedupe_candidates(candidates: list[RepeatedIslandCandidate]) -> list[Repeat
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _proposal_target_word_ids(
+    candidate: RepeatedIslandCandidate,
+    source_graph: CanonicalSourceGraph,
+) -> list[str]:
+    if _middle_fragment_abandoned_by_source_boundary_restart(candidate, source_graph):
+        return [*candidate.first_word_ids, *candidate.middle_word_ids]
+    return list(candidate.first_word_ids)
+
+
+def _middle_fragment_abandoned_by_source_boundary_restart(
+    candidate: RepeatedIslandCandidate,
+    source_graph: CanonicalSourceGraph,
+) -> bool:
+    if not candidate.middle_word_ids or not candidate.second_word_ids or not candidate.after_second_word_ids:
+        return False
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    left_ids = [*candidate.first_word_ids, *candidate.middle_word_ids]
+    right_ids = [*candidate.second_word_ids, *candidate.after_second_word_ids]
+    left_uids = [_subtitle_uid(words_by_id.get(word_id)) for word_id in left_ids]
+    right_uids = [_subtitle_uid(words_by_id.get(word_id)) for word_id in right_ids]
+    if any(not uid for uid in left_uids) or any(not uid for uid in right_uids):
+        return False
+    left_uid = left_uids[0]
+    right_uid = right_uids[0]
+    if left_uid == right_uid:
+        return False
+    return all(uid == left_uid for uid in left_uids) and all(uid == right_uid for uid in right_uids)
+
+
+def _build_abandoned_middle_fragment_residual_proposals(
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    *,
+    start_index: int,
+) -> list[TimelineRepairProposal]:
+    proposals: list[TimelineRepairProposal] = []
+    used_word_ids = {str(word_id) for segment in final_timeline for word_id in segment.word_ids if str(word_id)}
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    source_index = {word.word_id: index for index, word in enumerate(source_graph.words)}
+    for segment in ordered_segments(final_timeline):
+        candidate = _abandoned_middle_fragment_residual_candidate(segment, source_graph, words_by_id, source_index, used_word_ids)
+        if candidate is None:
+            continue
+        proposal_index = start_index + len(proposals)
+        target_word_ids = list(candidate["target_word_ids"])
+        proposals.append(
+            TimelineRepairProposal(
+                proposal_id=f"repeated_island_residual_{proposal_index:06d}_{segment.segment_id}",
+                issue_type="repeated_island",
+                confidence=0.91,
+                target_segment_id=segment.segment_id,
+                target_word_ids=target_word_ids,
+                target_source_start_us=_word_source_start_us(target_word_ids, source_graph),
+                target_source_end_us=_word_source_end_us(target_word_ids, source_graph),
+                target_text=text_from_word_ids(target_word_ids, source_graph),
+                repair_action="trim",
+                risk_tags=["same_segment_repeated_island", "abandoned_middle_fragment_residual", "whole_word_prefix_trim"],
+                evidence={
+                    **candidate,
+                    "proposal_policy": "trim_abandoned_middle_fragment_left_after_prior_restart_island_drop",
+                },
+            )
+        )
+    return proposals
+
+
+def _abandoned_middle_fragment_residual_candidate(
+    segment: FinalTimelineSegment,
+    source_graph: CanonicalSourceGraph,
+    words_by_id: dict[str, Any],
+    source_index: dict[str, int],
+    used_word_ids: set[str],
+) -> dict[str, Any] | None:
+    segment_word_ids = [str(word_id) for word_id in segment.word_ids if str(word_id)]
+    if len(segment_word_ids) < 3:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    first_word = words_by_id.get(segment_word_ids[0])
+    if first_word is None:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    first_source_index = source_index.get(segment_word_ids[0])
+    if first_source_index is None or first_source_index <= 0:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    previous_source_word = source_graph.words[first_source_index - 1]
+    previous_word_id = str(getattr(previous_source_word, "word_id", "") or "")
+    previous_text = normalize_text(str(getattr(previous_source_word, "text", "") or ""))
+    first_uid = _subtitle_uid(first_word)
+    if not previous_word_id or previous_word_id in used_word_ids or not previous_text or not first_uid:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    if _subtitle_uid(previous_source_word) != first_uid or _cjk_char_count(previous_text) < MIN_REPEATED_ISLAND_CJK_CHARS:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    for restart_index in range(1, min(len(segment_word_ids), 6)):
+        restart_word = words_by_id.get(segment_word_ids[restart_index])
+        if restart_word is None:
+            continue
+        restart_uid = _subtitle_uid(restart_word)
+        if not restart_uid or restart_uid == first_uid:
+            continue
+        restart_text = normalize_text(str(getattr(restart_word, "text", "") or ""))
+        if restart_text != previous_text:
+            continue
+        prefix_ids = segment_word_ids[:restart_index]
+        if not prefix_ids:
+            continue
+        if any(_subtitle_uid(words_by_id.get(word_id)) != first_uid for word_id in prefix_ids):
+            continue
+        after_ids = segment_word_ids[restart_index + 1 :]
+        if not after_ids or _cjk_char_count(text_from_word_ids(after_ids, source_graph)) < MIN_AFTER_SECOND_CJK_CHARS:
+            continue
+        if _subtitle_uid(words_by_id.get(after_ids[0])) != restart_uid:
+            continue
+        prefix_text = text_from_word_ids(prefix_ids, source_graph)
+        if _cjk_char_count(prefix_text) > MAX_HIGH_CONFIDENCE_MIDDLE_CJK_CHARS:
+            continue
+        return {
+            "segment_id": segment.segment_id,
+            "target_word_ids": prefix_ids,
+            "dropped_restart_word_id": previous_word_id,
+            "restart_word_id": segment_word_ids[restart_index],
+            "restart_text": restart_text,
+            "middle_text": prefix_text,
+            "after_restart_text": text_from_word_ids(after_ids, source_graph),
+            "confidence": "high",
+            "reason": "leading middle fragment remains after the prior repeated island was already dropped before a source-boundary restart",
+        }
+    no_candidate: dict[str, Any] | None = None
+    return no_candidate
+
+
+def _subtitle_uid(word: Any) -> str:
+    if word is None:
+        return ""
+    return str(getattr(word, "subtitle_uid", "") or "")
 
 
 def _contains_definition_marker(text: str) -> bool:

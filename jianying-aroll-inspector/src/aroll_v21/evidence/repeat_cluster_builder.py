@@ -9,9 +9,11 @@ from aroll_v21.ir.models import CandidateEvidence, CanonicalSourceGraph, EditUni
 from aroll_v21.quality.repeat_span_repair import self_repair_aborted_phrase_candidate
 
 
-CJK_NUMERAL_PREFIXES = tuple("一二两三四五六七八九十百千万半几多")
+CJK_NUMERAL_PREFIXES = tuple("零〇一二两三四五六七八九十百千万亿半几多0123456789")
 REDUPLICATION_MODIFIER_SUFFIXES = ("的", "地", "得")
 MAX_PROTECTED_MODIFIER_REDUPLICATION_CHARS = 4
+REDUPLICATION_AMOUNT_UNITS = tuple("个只件台部杯瓶份次块元毛角分钱万千百十亿年月天小时分钟公里米斤克岁平")
+REDUPLICATION_FALSE_START_SINGLE_CHARS = set("我你他她它这那就会又也还再都才要想能该")
 
 
 def _unit_display_rows(units: list[EditUnit]) -> list[dict[str, Any]]:
@@ -246,7 +248,10 @@ class CandidateEvidenceBuilder:
             end = start + len(repeated) if start >= 0 else -1
         if start < 0 or end <= start or text[start:end] != phrase + phrase:
             return False
-        return end < len(text) and text[end] in REDUPLICATION_MODIFIER_SUFFIXES
+        return self._is_protected_reduplication_follow(
+            phrase,
+            [text[end : end + 8]],
+        )
 
     def _split_metadata_for_candidate(
         self,
@@ -590,17 +595,36 @@ class CandidateEvidenceBuilder:
         suffix_index = start + (phrase_len * 2)
         if suffix_index < 0 or suffix_index >= len(norm):
             return False
-        return norm[suffix_index] in REDUPLICATION_MODIFIER_SUFFIXES
+        return self._is_protected_reduplication_follow(phrase, [norm[suffix_index : suffix_index + 8]])
 
     def _is_protected_word_audio_modifier_reduplication(self, tokens: list[str], start: int, size: int) -> bool:
         phrase = "".join(tokens[start : start + size])
-        if not self._looks_like_reduplicated_modifier_phrase(phrase):
-            return False
         suffix_index = start + (size * 2)
         if suffix_index >= len(tokens):
             return False
-        suffix = normalize_text(tokens[suffix_index])
-        return suffix.startswith(REDUPLICATION_MODIFIER_SUFFIXES)
+        return self._is_protected_reduplication_follow(phrase, tokens[suffix_index : suffix_index + 4])
+
+    def _is_protected_reduplication_follow(self, phrase: str, following_tokens: list[str]) -> bool:
+        if not self._looks_like_reduplicated_modifier_phrase(phrase):
+            return False
+        if len(phrase) == 1 and phrase in REDUPLICATION_FALSE_START_SINGLE_CHARS:
+            return False
+        following = normalize_text("".join(following_tokens))
+        if not following:
+            return False
+        if following.startswith(REDUPLICATION_MODIFIER_SUFFIXES):
+            return True
+        return self._looks_like_quantity_or_amount_follow(following)
+
+    def _looks_like_quantity_or_amount_follow(self, following: str) -> bool:
+        if not following:
+            return False
+        if following[0] not in CJK_NUMERAL_PREFIXES:
+            return False
+        tail = following[1:8]
+        if not tail:
+            return False
+        return any(char in REDUPLICATION_AMOUNT_UNITS for char in tail)
 
     def _looks_like_reduplicated_modifier_phrase(self, phrase: str) -> bool:
         if not phrase or len(phrase) > MAX_PROTECTED_MODIFIER_REDUPLICATION_CHARS:

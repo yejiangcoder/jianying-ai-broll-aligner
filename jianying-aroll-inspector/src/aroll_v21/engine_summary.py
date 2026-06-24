@@ -608,3 +608,4 @@ def _normalize_effective_speed_prewrite_placeholder(payload: Any) -> dict[str, A
         normalized["not_applicable"] = True
         normalized.setdefault("not_applicable_reason", "prewrite_source_binding_pending")
     return normalized
+

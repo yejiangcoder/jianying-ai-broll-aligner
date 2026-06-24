@@ -49,10 +49,12 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                     "deepseek:",
                     f"  api-key: {key}",
                     "  base-url: https://api.deepseek.com",
+                    "  model: deepseek-v4-pro",
+                    "  thinking-type: enabled",
                     "app:",
                     "  ai:",
                     "    semantic:",
-                    "      model: deepseek-chat",
+                    "      model: deepseek-v4-pro",
                 ]
             ),
             "utf-8",
@@ -126,10 +128,11 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                         "deepseek:",
                         "  api" + "-key: local-test-token",
                         "  base-url: https://api.deepseek.com",
+                        "  timeout-s: 123",
                         "app:",
                         "  ai:",
                         "    summary:",
-                        "      model: deepseek-chat",
+                        "      model: deepseek-v4-flash",
                     ]
                 ),
                 "utf-8",
@@ -139,7 +142,33 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
 
         self.assertEqual(config["api_key"], "local-test-token")
         self.assertEqual(config["base_url"], "https://api.deepseek.com")
-        self.assertEqual(config["model"], "deepseek-chat")
+        self.assertEqual(config["model"], "deepseek-v4-flash")
+        self.assertEqual(config["timeout_s"], "123")
+
+    def test_deepseek_provider_uses_timeout_from_yaml_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "deepseek.local.yaml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "deepseek:",
+                        "  api" + "-key: local-test-token",
+                        "  base-url: https://api.deepseek.com",
+                        "  model: deepseek-v4-pro",
+                        "  timeout-s: 123",
+                    ]
+                ),
+                "utf-8",
+            )
+
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "aroll_v21.decision.deepseek_semantic_planner.DEFAULT_DEEPSEEK_CONFIG_PATHS",
+                (path,),
+            ):
+                provider = deepseek_provider_from_runtime_config()
+
+        self.assertIsNotNone(provider)
+        self.assertEqual(provider.timeout_s, 123)
 
     def test_deepseek_provider_loads_from_runtime_secrets_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,7 +276,8 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
         self.assertIsNotNone(provider)
         self.assertEqual(provider.api_key, "local-test-token")
         self.assertEqual(provider.base_url, "https://api.deepseek.com/chat/completions")
-        self.assertEqual(provider.model, "deepseek-chat")
+        self.assertEqual(provider.model, "deepseek-v4-pro")
+        self.assertEqual(provider.thinking_type, "enabled")
 
     def test_deepseek_prompt_schema_allows_keep_longest_drop_others(self) -> None:
         captured = {}
@@ -282,7 +312,39 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
         user_content = json.loads(payload["messages"][1]["content"])
         decisions = user_content["schema"]["decisions"][0]["decision"].split("|")
         self.assertEqual(captured["timeout"], 7)
+        self.assertEqual(payload["model"], "deepseek-v4-pro")
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertNotIn("temperature", payload)
         self.assertIn("keep_longest_drop_others", decisions)
+
+    def test_deepseek_reasoner_legacy_model_maps_to_v4_pro_thinking_mode(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+            captured["body"] = request.data
+            payload = json.loads(request.data.decode("utf-8"))
+            user_content = json.loads(payload["messages"][1]["content"])
+            return _FakeDeepSeekResponse(batch_id=user_content["batch_id"])
+
+        provider = DeepSeekSemanticProvider(api_key="unit-test-token", model="deepseek-reasoner")
+        semantic_request = SemanticAdjudicationRequest(
+            issue_id="semantic_tc_0001",
+            issue_type=SemanticIssueType.SEMANTIC_CONTAINMENT,
+            severity=SemanticIssueSeverity.MEDIUM,
+            text_before="前文",
+            text_after="后文",
+            allowed_decisions=["keep_all", "drop_left", "drop_right", "requires_human_review"],
+        )
+
+        with patch("urllib.request.urlopen", new=fake_urlopen):
+            provider.decide([semantic_request])
+
+        payload = json.loads(captured["body"].decode("utf-8"))
+        self.assertEqual(provider.model, "deepseek-v4-pro")
+        self.assertEqual(provider.thinking_type, "enabled")
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "high")
 
     def test_keep_longest_drop_others_decision_type_roundtrip(self) -> None:
         self.assertEqual(
@@ -403,7 +465,7 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
                         "app:",
                         "  ai:",
                         "    semantic:",
-                        "      model: deepseek-chat",
+                        "      model: deepseek-v4-pro",
                     ]
                 ),
                 "utf-8",
@@ -419,7 +481,7 @@ class ArollV21DeepSeekConfigTests(unittest.TestCase):
         self.assertIsNotNone(provider)
         self.assertEqual(provider.config_source, "reference-application.yaml")
         self.assertEqual(provider.base_url, "https://api.deepseek.com/chat/completions")
-        self.assertEqual(provider.model, "deepseek-chat")
+        self.assertEqual(provider.model, "deepseek-v4-pro")
 
     def test_auto_mode_provider_configured_when_smoke_config_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

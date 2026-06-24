@@ -52,6 +52,8 @@ _LEXICAL_REDUPLICATION_PREFIX_STOPWORDS = (
     "再",
     "又",
 )
+_NUMERAL_RESTART_CHARS = set("一二三四五六七八九十两")
+_NUMERAL_CLASSIFIER_STARTS = set("个件节门块万千百元分毛次种类套张份杯瓶支台辆只条")
 
 
 def _text(row: dict[str, Any]) -> str:
@@ -434,7 +436,7 @@ def _normalize_intraword_cjk_restarts(words: list[CanonicalWord]) -> list[Canoni
                     "original_source_end_us": int(word.source_end_us),
                     "trimmed_source_start_us": _trimmed_intraword_source_start_us(word, replacement),
                     "trimmed_leading_char_count": _intraword_leading_drop_char_count(word.text, replacement),
-                    "normalization_reason": "leading_single_char_restart_before_result_complement",
+                    "normalization_reason": _intraword_cjk_restart_normalization_reason(word.text, next_text),
                 },
             )
         )
@@ -451,6 +453,8 @@ def _intraword_cjk_restart_replacement(text: str, next_text: str, previous_text:
         return no_replacement
     if len(raw) >= 3 and raw[0] == raw[1] and raw[2:].startswith(_RESULT_COMPLEMENT_STARTS):
         return raw[1:]
+    if len(raw) >= 3 and raw[0] == raw[1] and raw[0] in _NUMERAL_RESTART_CHARS and raw[2] in _NUMERAL_CLASSIFIER_STARTS:
+        return raw[1:]
     next_normalized = normalize_text(next_text)
     if (
         len(raw) == 2
@@ -458,8 +462,28 @@ def _intraword_cjk_restart_replacement(text: str, next_text: str, previous_text:
         and next_normalized.startswith(_RESULT_COMPLEMENT_STARTS)
     ):
         return raw[0]
+    if (
+        len(raw) == 2
+        and raw[0] == raw[1]
+        and raw[0] in _NUMERAL_RESTART_CHARS
+        and next_normalized[:1] in _NUMERAL_CLASSIFIER_STARTS
+    ):
+        return raw[0]
     no_replacement: str | None = None
     return no_replacement
+
+
+def _intraword_cjk_restart_normalization_reason(text: str, next_text: str) -> str:
+    raw = str(text or "")
+    next_normalized = normalize_text(next_text)
+    if (
+        len(raw) >= 2
+        and raw[0] == raw[1]
+        and raw[0] in _NUMERAL_RESTART_CHARS
+        and ((len(raw) >= 3 and raw[2] in _NUMERAL_CLASSIFIER_STARTS) or next_normalized[:1] in _NUMERAL_CLASSIFIER_STARTS)
+    ):
+        return "leading_repeated_numeral_before_classifier"
+    return "leading_single_char_restart_before_result_complement"
 
 
 def _looks_like_prefixed_reduplicated_lexeme(raw: str, next_text: str, previous_text: str) -> bool:

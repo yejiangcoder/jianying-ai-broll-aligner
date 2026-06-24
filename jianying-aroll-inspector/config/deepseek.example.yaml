@@ -2,4 +2,7 @@ deepseek:
   # Replace with your real DeepSeek API key, or edit config/deepseek.yaml directly in this private repo.
   api-key: "sk-REPLACE_WITH_DEEPSEEK_API_KEY"
   base-url: "https://api.deepseek.com"
-  model: "deepseek-chat"
+  model: "deepseek-v4-pro"
+  thinking-type: "enabled"
+  reasoning-effort: "high"
+  timeout-s: 180

@@ -14,3 +14,4 @@ def _window_lower_for_segment(segment: FinalTimelineSegment, windows: list[tuple
         if int(start) <= int(segment.source_start_us) and int(segment.source_end_us) <= int(end):
             return int(start)
     return int(segment.source_start_us)
+

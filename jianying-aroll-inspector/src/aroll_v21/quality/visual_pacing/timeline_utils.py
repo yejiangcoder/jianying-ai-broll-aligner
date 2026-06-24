@@ -19,3 +19,4 @@ def _repack(segments: list[FinalTimelineSegment]) -> list[FinalTimelineSegment]:
         )
         cursor += duration
     return repacked
+

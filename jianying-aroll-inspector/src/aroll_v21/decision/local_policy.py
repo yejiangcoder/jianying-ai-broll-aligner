@@ -185,3 +185,5 @@ class LocalPolicy:
                 "drop_text": str(binding.get("drop_text") or ""),
             },
         )
+
+

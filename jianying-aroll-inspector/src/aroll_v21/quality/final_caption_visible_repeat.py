@@ -32,12 +32,18 @@ DANGLING_DE_EXCEPTIONS = ("的确", "的话")
 DANGLING_ASPECT_EXCEPTIONS = ("了解", "了不起", "过去", "过程", "过来", "过渡", "着陆")
 DANGLING_PRONOUN_MODAL_PRONOUNS = ("你", "他", "我", "咱", "人家", "自己")
 DANGLING_PRONOUN_MODAL_TAILS = ("只", "就", "还", "都", "也", "才", "会", "能", "敢", "要", "把", "给", "在", "被", "让")
+DANGLING_PRONOUN_OPEN_TAIL_ENDS = ("在", "把", "给", "被", "让", "向", "对", "跟", "和", "去")
+DANGLING_WEAK_PRONOUN_FRAGMENT_PREFIXES = ("就", "但", "但你", "就是")
 NEGATIVE_RESTART_PREFIX = "不"
 NEGATIVE_PREDICATE_MODAL_PREFIXES = ("可", "能", "会", "敢", "受", "被")
 PARTIAL_RESTART_MIN_CHARS = 2
 PARTIAL_RESTART_MAX_DROP_CHARS = 6
 PARTIAL_RESTART_MAX_COMPLETED_CHARS = 10
-PARTIAL_RESTART_LEFT_CONTEXT_CHARS = 5
+PARTIAL_RESTART_LEFT_CONTEXT_CHARS = 8
+PARTIAL_RESTART_MIN_SHARED_PREFIX_CHARS = 4
+PARTIAL_RESTART_MAX_TAIL_MISMATCH_CHARS = 2
+PARTIAL_RESTART_MIN_TAIL_MISMATCH_COMPLETION_CHARS = 2
+PARTIAL_RESTART_TAIL_MISMATCH_ALLOWED_TAILS = ("去", "来", "上", "下", "里", "中", "内", "外", "了", "的")
 SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS = 3
 SHORT_FRAGMENT_RESTART_MAX_LEFT_CHARS = 8
 SHORT_FRAGMENT_RESTART_LOOKAHEAD = 3
@@ -48,9 +54,18 @@ INTERNAL_PREFIX_RESTART_MAX_PHRASE_CHARS = 10
 INTERNAL_PREFIX_RESTART_MAX_GAP_CHARS = 4
 INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS = 14
 INTERNAL_PREFIX_RESTART_LEAD_PREFIXES = ("", "就", "呃", "啊", "嗯")
+INTERNAL_PREFIX_RESTART_MAX_LEAD_CHARS = 2
+INTERNAL_PREFIX_RESTART_MAX_FUZZY_GAP_CHARS = 2
+ABANDONED_CLAUSE_RESTART_MIN_PHRASE_CHARS = 2
+ABANDONED_CLAUSE_RESTART_MAX_PHRASE_CHARS = 10
+ABANDONED_CLAUSE_RESTART_MAX_GAP_CHARS = 12
+ABANDONED_CLAUSE_RESTART_MAX_DROP_CHARS = 24
+ABANDONED_CLAUSE_RESTART_PARTICLES = ("呢", "啊", "哦", "喔", "呃", "嗯", "吗", "嘛", "吧")
 REPEATED_DISCOURSE_OPENERS = ("但凡", "如果", "假如", "要是", "所以", "因为", "但是", "然后", "其实", "就是")
 REPEATED_DISCOURSE_MIN_REMAINDER_CHARS = 3
 REPEATED_DISCOURSE_MAX_SOURCE_GAP_US = 500_000
+SUSPECT_REPEATED_NUMERALS = set("一二三四五六七八九十两")
+SUSPECT_NUMERAL_CLASSIFIER_STARTS = set("个件节门块万千百元分毛次种类套张份杯瓶支台辆只条")
 FINAL_VISIBLE_RECHECK_DECISIONS = [
     "drop_bad_fragment",
     "trim_repeated_prefix",
@@ -412,6 +427,8 @@ def _dangling_prefix_suffix_reason(text: str) -> str:
         return "dangling_aspect_suffix_caption"
     if _dangling_pronoun_modal_suffix(text):
         return "dangling_pronoun_modal_suffix"
+    if _dangling_weak_pronoun_fragment(text):
+        return "dangling_weak_pronoun_fragment"
     return ""
 
 
@@ -423,7 +440,23 @@ def _dangling_pronoun_modal_suffix(text: str) -> str:
             suffix = f"{pronoun}{tail}"
             if text.endswith(suffix) and len(text) > len(suffix) + 2:
                 return suffix
+    search_start = max(0, len(text) - 6)
+    for pronoun in DANGLING_PRONOUN_MODAL_PRONOUNS:
+        index = text.rfind(pronoun, search_start)
+        if index < 0:
+            continue
+        suffix = text[index:]
+        if 3 <= len(suffix) <= 5 and suffix.endswith(DANGLING_PRONOUN_OPEN_TAIL_ENDS) and len(text) > len(suffix) + 2:
+            return suffix
     return ""
+
+
+def _dangling_weak_pronoun_fragment(text: str) -> bool:
+    if not 4 <= len(text) <= 6:
+        return False
+    if not any(text.startswith(prefix) for prefix in DANGLING_WEAK_PRONOUN_FRAGMENT_PREFIXES):
+        return False
+    return any(text.endswith(pronoun) for pronoun in DANGLING_PRONOUN_MODAL_PRONOUNS)
 
 
 def _semantic_garbage_or_asr_suspect_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
@@ -457,6 +490,9 @@ def _asr_restart_suspect(text: str) -> dict[str, Any] | None:
     if len(text) < 4:
         empty_result: dict[str, Any] | None = None
         return empty_result
+    intra_token = _intra_token_numeral_duplicate_suspect(text)
+    if intra_token:
+        return intra_token
     for unit_len in range(1, min(3, len(text) // 2) + 1):
         unit = text[:unit_len]
         if not re.fullmatch(r"[\u4e00-\u9fff]+", unit):
@@ -470,6 +506,26 @@ def _asr_restart_suspect(text: str) -> dict[str, Any] | None:
             }
     empty_result: dict[str, Any] | None = None
     return empty_result
+
+
+def _intra_token_numeral_duplicate_suspect(text: str) -> dict[str, Any] | None:
+    normalized = normalize_text(text)
+    if len(normalized) < 3:
+        no_suspect: dict[str, Any] | None = None
+        return no_suspect
+    first, second, third = normalized[0], normalized[1], normalized[2]
+    if first != second:
+        no_suspect: dict[str, Any] | None = None
+        return no_suspect
+    if first not in SUSPECT_REPEATED_NUMERALS or third not in SUSPECT_NUMERAL_CLASSIFIER_STARTS:
+        no_suspect: dict[str, Any] | None = None
+        return no_suspect
+    return {
+        "pattern": "intra_token_repeated_numeral_before_classifier",
+        "overlap_text": normalized[:3],
+        "score": 1.0,
+        "requires_token_level_audio_review": True,
+    }
 
 
 def _cross_caption_semantic_containment_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
@@ -865,11 +921,60 @@ def _partial_phrase_restart_matches(text: str, boundary: int, search_start: int 
                         }
                     )
                     break
+    matches.extend(_partial_phrase_tail_mismatch_restart_matches(text, boundary, search_start))
+    return matches
+
+
+def _partial_phrase_tail_mismatch_restart_matches(text: str, boundary: int, search_start: int = 0) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    if boundary <= 0 or boundary >= len(text):
+        return matches
+    right_text = text[boundary:]
+    if not _plain_cjk(right_text):
+        return matches
+    max_start = min(boundary - PARTIAL_RESTART_MIN_SHARED_PREFIX_CHARS, boundary)
+    for start in range(max(0, search_start), max_start + 1):
+        left_suffix = text[start:boundary]
+        if not _plain_cjk(left_suffix):
+            continue
+        max_shared = min(len(left_suffix) - 1, len(right_text), PARTIAL_RESTART_MAX_DROP_CHARS)
+        for shared_len in range(max_shared, PARTIAL_RESTART_MIN_SHARED_PREFIX_CHARS - 1, -1):
+            shared_prefix = left_suffix[:shared_len]
+            left_tail = left_suffix[shared_len:]
+            if not left_tail or len(left_tail) > PARTIAL_RESTART_MAX_TAIL_MISMATCH_CHARS:
+                continue
+            if left_tail not in PARTIAL_RESTART_TAIL_MISMATCH_ALLOWED_TAILS:
+                continue
+            if not right_text.startswith(shared_prefix):
+                continue
+            right_completion = right_text[shared_len:]
+            if _cjk_char_count(right_completion) < PARTIAL_RESTART_MIN_TAIL_MISMATCH_COMPLETION_CHARS:
+                continue
+            if right_completion.startswith(left_tail):
+                continue
+            completed_len = min(len(right_text), shared_len + max(PARTIAL_RESTART_MIN_TAIL_MISMATCH_COMPLETION_CHARS, len(left_tail) + 1))
+            matches.append(
+                {
+                    "pattern": "partial_phrase_restart_tail_mismatch",
+                    "start": start,
+                    "pivot": boundary,
+                    "end": boundary + completed_len,
+                    "drop_text": left_suffix,
+                    "completed_text": right_text[:completed_len],
+                    "overlap_text": left_suffix + right_text[:completed_len],
+                    "shared_prefix": shared_prefix,
+                    "left_tail": left_tail,
+                    "score": round(len(shared_prefix) / max(1, len(left_suffix)), 6),
+                }
+            )
+            break
     return matches
 
 
 def _negative_predicate_restart_matches(text: str) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
+    matches.extend(_negative_filler_restart_matches(text))
+    matches.extend(_strengthened_negative_restart_matches(text))
     for start in range(0, max(0, len(text) - 4)):
         if text[start] != NEGATIVE_RESTART_PREFIX:
             continue
@@ -898,6 +1003,61 @@ def _negative_predicate_restart_matches(text: str) -> list[dict[str, Any]]:
                     }
                 )
                 break
+    return matches
+
+
+def _negative_filler_restart_matches(text: str) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for match in re.finditer(r"不([\u4e00-\u9fff]{1,2})不([\u4e00-\u9fff]{2,8})", text):
+        filler = match.group(1)
+        right = match.group(2)
+        if filler not in {"就", "是", "会", "能", "敢", "要", "可"}:
+            continue
+        previous_char = text[match.start() - 1 : match.start()] if match.start() > 0 else ""
+        if previous_char == filler and filler in {"会", "能", "敢", "要"}:
+            continue
+        drop_text = text[match.start() : match.start(2) - 1]
+        overlap_text = text[match.start() : match.end()]
+        matches.append(
+            {
+                "pattern": "negative_predicate_restart",
+                "start": match.start(),
+                "end": match.end(),
+                "left_predicate": filler,
+                "right_predicate": right,
+                "drop_text": drop_text,
+                "overlap_text": overlap_text,
+                "score": round(len(drop_text) / max(1, len(overlap_text)), 6),
+            }
+        )
+    return matches
+
+
+def _strengthened_negative_restart_matches(text: str) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    pattern = re.compile(r"((?:[\u4e00-\u9fff]{0,2})不(?:会|能|敢|要|想|肯))((?:绝不|不)[\u4e00-\u9fff]{1,8})")
+    for match in pattern.finditer(text):
+        drop_text = match.group(1)
+        if len(drop_text) < 2 or len(drop_text) > 8:
+            continue
+        if drop_text.count(NEGATIVE_RESTART_PREFIX) > 1:
+            continue
+        negative_index = drop_text.rfind(NEGATIVE_RESTART_PREFIX)
+        if negative_index > 0 and drop_text[negative_index - 1] in {"会", "能", "敢", "要"}:
+            continue
+        overlap_text = match.group(0)
+        matches.append(
+            {
+                "pattern": "negative_predicate_restart",
+                "start": match.start(1),
+                "end": match.end(2),
+                "left_predicate": drop_text,
+                "right_predicate": match.group(2),
+                "drop_text": drop_text,
+                "overlap_text": overlap_text,
+                "score": round(len(drop_text) / max(1, len(overlap_text)), 6),
+            }
+        )
     return matches
 
 
@@ -992,6 +1152,121 @@ def _internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
                     "phrase_chars": phrase_len,
                     "score": round(phrase_len / max(1, len(drop_text)), 6),
                 }
+    fuzzy = _fuzzy_internal_prefix_restart_repeat(text)
+    if fuzzy is not None and (
+        best is None or int(fuzzy.get("phrase_chars") or 0) > int(best.get("phrase_chars") or 0)
+    ):
+        return fuzzy
+    abandoned = _abandoned_clause_restart_repeat(text)
+    if abandoned is not None and (
+        best is None or int(abandoned.get("phrase_chars") or 0) >= int(best.get("phrase_chars") or 0)
+    ):
+        return abandoned
+    return best
+
+
+def _abandoned_clause_restart_repeat(text: str) -> dict[str, Any] | None:
+    if len(text) < ABANDONED_CLAUSE_RESTART_MIN_PHRASE_CHARS * 2 + 1:
+        no_restart: dict[str, Any] | None = None
+        return no_restart
+    best: dict[str, Any] | None = None
+    max_phrase_len = min(ABANDONED_CLAUSE_RESTART_MAX_PHRASE_CHARS, len(text) // 2)
+    for phrase_len in range(ABANDONED_CLAUSE_RESTART_MIN_PHRASE_CHARS, max_phrase_len + 1):
+        for first_start in range(0, max(0, len(text) - phrase_len * 2) + 1):
+            phrase = text[first_start : first_start + phrase_len]
+            if not _plain_cjk(phrase):
+                continue
+            second_start = text.find(phrase, first_start + phrase_len + 1)
+            if second_start < 0:
+                continue
+            gap = text[first_start + phrase_len : second_start]
+            if not gap or len(gap) > ABANDONED_CLAUSE_RESTART_MAX_GAP_CHARS or not _plain_cjk(gap):
+                continue
+            drop_text = text[first_start:second_start]
+            if phrase.startswith(NEGATIVE_RESTART_PREFIX):
+                continue
+            if len(drop_text) > ABANDONED_CLAUSE_RESTART_MAX_DROP_CHARS:
+                continue
+            after_second = text[second_start + phrase_len :]
+            min_remainder_chars = 2 if phrase_len <= 2 else REPEATED_DISCOURSE_MIN_REMAINDER_CHARS
+            if _cjk_char_count(after_second) < min_remainder_chars:
+                continue
+            if not _abandoned_clause_restart_signal(gap, after_second, phrase_len):
+                continue
+            if best is None or (
+                phrase_len,
+                len(drop_text),
+            ) > (
+                int(best.get("phrase_chars") or 0),
+                int(best.get("drop_chars") or 0),
+            ):
+                best = {
+                    "pattern": "abandoned_clause_restart",
+                    "restart_phrase": phrase,
+                    "overlap_text": text[first_start : second_start + phrase_len],
+                    "drop_text": drop_text,
+                    "first_start": first_start,
+                    "second_start": second_start,
+                    "gap_text": gap,
+                    "phrase_chars": phrase_len,
+                    "drop_chars": len(drop_text),
+                    "score": round(phrase_len / max(1, len(drop_text)), 6),
+                }
+    return best
+
+
+def _abandoned_clause_restart_signal(gap: str, after_second: str, phrase_len: int) -> bool:
+    if gap.endswith(ABANDONED_CLAUSE_RESTART_PARTICLES):
+        return True
+    if phrase_len <= 2 and gap[-1:] and after_second.startswith(gap[-1]):
+        return True
+    if len(gap) >= 2 and after_second.startswith(gap[-2:]):
+        return True
+    return False
+
+
+def _fuzzy_internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
+    if len(text) < SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS * 2 + 1:
+        no_restart: dict[str, Any] | None = None
+        return no_restart
+    max_phrase_len = min(INTERNAL_PREFIX_RESTART_MAX_PHRASE_CHARS, len(text) // 2)
+    best: dict[str, Any] | None = None
+    for phrase_len in range(SHORT_FRAGMENT_RESTART_MIN_OVERLAP_CHARS, max_phrase_len + 1):
+        max_first_start = min(INTERNAL_PREFIX_RESTART_MAX_LEAD_CHARS, max(0, len(text) - phrase_len * 2))
+        for first_start in range(0, max_first_start + 1):
+            phrase = text[first_start : first_start + phrase_len]
+            if not _plain_cjk(phrase):
+                continue
+            second_start = text.find(phrase, first_start + phrase_len + 1)
+            if second_start < 0:
+                continue
+            lead_prefix = text[:first_start]
+            gap = text[first_start + phrase_len : second_start]
+            if len(gap) > INTERNAL_PREFIX_RESTART_MAX_FUZZY_GAP_CHARS:
+                continue
+            if gap and not _plain_cjk(gap):
+                continue
+            restart_start = second_start - len(gap) if gap else second_start
+            drop_text = text[:restart_start]
+            if not drop_text or len(drop_text) > INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS:
+                continue
+            after_second = text[second_start + phrase_len :]
+            if _cjk_char_count(after_second) < REPEATED_DISCOURSE_MIN_REMAINDER_CHARS:
+                continue
+            if best is None or phrase_len > int(best.get("phrase_chars") or 0):
+                best = {
+                    "pattern": "internal_prefix_restart",
+                    "restart_phrase": phrase,
+                    "overlap_text": text[first_start : second_start + phrase_len],
+                    "drop_text": drop_text,
+                    "first_start": first_start,
+                    "restart_start": restart_start,
+                    "second_start": second_start,
+                    "gap_text": gap,
+                    "lead_prefix": lead_prefix,
+                    "phrase_chars": phrase_len,
+                    "score": round(phrase_len / max(1, len(drop_text)), 6),
+                }
     return best
 
 
@@ -1047,6 +1322,10 @@ def _longest_common_substring_row(left: str, right: str) -> dict[str, Any]:
 
 def _plain_cjk(text: str) -> bool:
     return bool(text) and bool(re.fullmatch(r"[\u4e00-\u9fff]+", text))
+
+
+def _cjk_char_count(text: str) -> int:
+    return sum(1 for char in str(text or "") if "\u4e00" <= char <= "\u9fff")
 
 
 def _candidate_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:

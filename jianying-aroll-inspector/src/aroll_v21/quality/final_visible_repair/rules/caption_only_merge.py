@@ -10,6 +10,10 @@ def configure_rule_dependencies(dependencies: dict[str, Any]) -> None:
 MAX_CAPTION_ONLY_TARGET_GAP_US = 120_000
 
 
+SUBJECT_PREFIX_COMPLETED_PREDICATE_REPAIR_REASON = "subject_prefix_completed_predicate_restart"
+SUBJECT_PREFIX_COMPLETED_PREDICATE_STARTS = ("全是", "都是", "全都是", "全部是", "尽是", "就是")
+
+
 def _finalize_caption_only_dangling_merges(
     captions: list[CaptionRenderUnit],
     *,
@@ -50,6 +54,88 @@ def _finalize_caption_only_dangling_merges(
         actions.append(step.action)
         pass_index += 1
     return current, actions
+
+
+def _finalize_subject_prefix_completed_predicate_caption_merges(
+    captions: list[CaptionRenderUnit],
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index_start: int,
+) -> tuple[list[CaptionRenderUnit], list[dict[str, Any]]]:
+    current = _renumber_captions(list(captions))
+    actions: list[dict[str, Any]] = []
+    pass_index = max(1, pass_index_start)
+    segments_by_id = {segment.segment_id: segment for segment in final_timeline}
+    while True:
+        ordered = _ordered_captions(current)
+        step: tuple[list[CaptionRenderUnit], dict[str, Any]] | None = None
+        for index in range(len(ordered) - 1):
+            left = ordered[index]
+            right = ordered[index + 1]
+            if not _caption_has_subject_prefix_restart_marker(left, segments_by_id):
+                continue
+            if not _caption_starts_with_completed_predicate(right):
+                continue
+            merged_result = _merge_adjacent_captions(left, right)
+            if merged_result is None:
+                continue
+            merged_caption, merge_decision = merged_result
+            if not bool(build_final_caption_visible_repeat_gate([merged_caption]).get("gate_passed")):
+                continue
+            repaired = [*ordered[:index], merged_caption, *ordered[index + 2 :]]
+            step = (
+                _renumber_captions(repaired),
+                _action(
+                    "subject_prefix_completed_predicate_restart",
+                    "caption_only_merge_subject_prefix_with_completed_predicate",
+                    pass_index,
+                    {
+                        "caption_id": left.caption_id,
+                        "related_caption_id": right.caption_id,
+                        "reason": "trimmed subject prefix caption should display with the completed predicate caption",
+                        "overlap_text": normalize_text(str(right.text or "")),
+                    },
+                    affected_caption_ids=[left.caption_id, right.caption_id],
+                    video_segment_merged=False,
+                    caption_only_merge_materialized=True,
+                    caption_only_merge_decision=merge_decision,
+                    merged_into_caption_id=left.caption_id,
+                    consumed_caption_id=right.caption_id,
+                    consumed_caption_state="consumed_by_subject_prefix_completed_predicate_merge",
+                    merged_caption_text=merged_caption.text,
+                    merged_caption_timeline_segment_ids=list(merged_caption.timeline_segment_ids),
+                    merged_caption_target_start_us=int(merged_caption.target_start_us),
+                    merged_caption_target_end_us=int(merged_caption.target_end_us),
+                ),
+            )
+            break
+        if step is None:
+            return current, actions
+        repaired, action = step
+        if _caption_only_state_signature(repaired) == _caption_only_state_signature(current):
+            return current, actions
+        current = repaired
+        actions.append(action)
+        pass_index += 1
+
+
+def _caption_has_subject_prefix_restart_marker(
+    caption: CaptionRenderUnit,
+    segments_by_id: dict[str, FinalTimelineSegment],
+) -> bool:
+    for segment_id in _caption_segment_ids(caption):
+        segment = segments_by_id.get(segment_id)
+        if segment is None:
+            continue
+        if str((segment.debug_hints or {}).get("final_visible_repair") or "") == SUBJECT_PREFIX_COMPLETED_PREDICATE_REPAIR_REASON:
+            return True
+    return False
+
+
+def _caption_starts_with_completed_predicate(caption: CaptionRenderUnit) -> bool:
+    text = normalize_text(str(caption.text or ""))
+    return bool(text) and any(text.startswith(prefix) for prefix in SUBJECT_PREFIX_COMPLETED_PREDICATE_STARTS)
 
 
 def _repair_dangling_prefix_suffix_caption_only(
@@ -123,26 +209,11 @@ def _merge_adjacent_caption_segments(
     if not _safe_merge_segments(left, right, source_graph):
         no_merge: list[FinalTimelineSegment] | None = None
         return no_merge
-    merged_word_ids = [*left.word_ids, *right.word_ids]
-    text = _text_from_word_ids(merged_word_ids, source_graph) or f"{left.text}{right.text}"
-    source_start_us = int(left.source_start_us)
-    source_end_us = int(right.source_end_us)
-    target_duration_us = _target_duration_preserving_effective_speed(left, source_start_us, source_end_us)
-    merged = replace(
+    merged = _merged_segment_pair_preserving_effective_speed(
         left,
-        source_end_us=source_end_us,
-        target_end_us=int(left.target_start_us) + target_duration_us,
-        word_ids=merged_word_ids,
-        text=text,
-        decision_ids=_unique([*left.decision_ids, *right.decision_ids]),
-        spoken_source_end_us=right.spoken_source_end_us if right.spoken_source_end_us is not None else left.spoken_source_end_us,
-        clip_source_end_us=right.clip_source_end_us if right.clip_source_end_us is not None else left.clip_source_end_us,
-        tail_handle_us=max(int(left.tail_handle_us), int(right.tail_handle_us)),
-        debug_hints={
-            **dict(left.debug_hints or {}),
-            "final_visible_repair": "merge_dangling_prefix_suffix",
-            "merged_segment_ids": [left.segment_id, right.segment_id],
-        },
+        right,
+        source_graph,
+        "merge_dangling_prefix_suffix",
     )
     return [*final_timeline[:previous_index], merged, *final_timeline[current_index + 1 :]]
 

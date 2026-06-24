@@ -1966,6 +1966,98 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertIn("举步维艰", [segment.text for segment in result.final_timeline])
         self.assertIn("举步维艰", [caption.text for caption in result.captions])
 
+    def test_final_visible_drops_four_char_low_information_isolated_fragment(self) -> None:
+        rows = [
+            ("w001", "她根本就不在乎别人评价", 0, 1_200_000),
+            ("w002", "就", 4_400_000, 4_680_000),
+            ("w003", "根本", 4_680_000, 4_960_000),
+            ("w004", "就", 4_960_000, 5_400_000),
+            ("w005", "集美她发那种精修图", 7_000_000, 8_200_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_200_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_200_000,
+                target_start_us=0,
+                target_end_us=1_200_000,
+                word_ids=["w001"],
+                text="她根本就不在乎别人评价",
+            ),
+            replace(
+                _segment(2, 1_200_000, 2_200_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=4_400_000,
+                source_end_us=5_400_000,
+                target_start_us=1_200_000,
+                target_end_us=2_200_000,
+                word_ids=["w002", "w003", "w004"],
+                text="就根本就",
+            ),
+            replace(
+                _segment(3, 2_200_000, 3_400_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=7_000_000,
+                source_end_us=8_200_000,
+                target_start_us=2_200_000,
+                target_end_us=3_400_000,
+                word_ids=["w005"],
+                text="集美她发那种精修图",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertIn("drop_isolated_junk_segment", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+        self.assertNotIn("就根本就", [segment.text for segment in result.final_timeline])
+        self.assertNotIn("就根本就", [caption.text for caption in result.captions])
+
+    def test_final_visible_keeps_action_fragment_before_dependent_object(self) -> None:
+        rows = [
+            ("w001", "你根本不知道什么叫爽", 0, 1_200_000),
+            ("w002", "抱着", 1_600_000, 2_000_000),
+            ("w003", "个破游戏就当享受了", 2_360_000, 3_600_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(_segment(1, 0, 1_200_000), source_material_id="main", source_segment_id="primary_window", source_start_us=0, source_end_us=1_200_000, word_ids=["w001"], text="你根本不知道什么叫爽"),
+            replace(_segment(2, 1_200_000, 1_600_000), source_material_id="main", source_segment_id="primary_window", source_start_us=1_600_000, source_end_us=2_000_000, word_ids=["w002"], text="抱着"),
+            replace(_segment(3, 1_600_000, 2_840_000), source_material_id="main", source_segment_id="primary_window", source_start_us=2_360_000, source_end_us=3_600_000, word_ids=["w003"], text="个破游戏就当享受了"),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertIn("抱着", [segment.text for segment in result.final_timeline])
+        self.assertNotIn(
+            "抱着",
+            [
+                action.get("junk_text")
+                for action in result.report["final_visible_repair_actions"]
+                if action["decision"] in {"drop_isolated_junk_segment", "trim_isolated_junk_words"}
+            ],
+        )
+
     def test_final_visible_trims_isolated_junk_suffix_from_shared_segment(self) -> None:
         rows = [
             ("w001", "出现在周围所有人的视线里", 0, 1_200_000),
@@ -2194,6 +2286,846 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertEqual(result.final_timeline[0].word_ids, ["w003", "w004", "w005"])
         self.assertEqual(result.final_timeline[0].text, "你们是极度恐慌")
         self.assertEqual(result.report["final_visible_repair_final_counts"]["restart_repeat_visible_count"], 0)
+
+    def test_final_visible_repairs_fuzzy_internal_prefix_restart(self) -> None:
+        rows = [
+            ("w001", "你", 0, 120_000),
+            ("w002", "去找", 120_000, 360_000),
+            ("w003", "那种", 360_000, 600_000),
+            ("w004", "漂亮", 600_000, 900_000),
+            ("w005", "你", 980_000, 1_100_000),
+            ("w006", "找", 1_100_000, 1_240_000),
+            ("w007", "那种", 1_240_000, 1_480_000),
+            ("w008", "漂亮", 1_480_000, 1_720_000),
+            ("w009", "女生的后台私信去看看", 1_720_000, 2_600_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_600_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_600_000,
+                target_start_us=0,
+                target_end_us=2_600_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="你去找那种漂亮你找那种漂亮女生的后台私信去看看",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual(result.final_timeline[0].word_ids[:5], ["w005", "w006", "w007", "w008", "w009"])
+        self.assertEqual(result.final_timeline[0].text, "你找那种漂亮女生的后台私信去看看")
+        self.assertEqual(result.report["final_visible_repair_actions"][0]["decision"], "trim_restart_prefix")
+
+    def test_final_visible_repairs_partial_phrase_tail_mismatch_restart(self) -> None:
+        rows = [
+            ("w001", "那为什么你验资", 0, 560_000),
+            ("w002", "失败后", 560_000, 920_000),
+            ("w003", "马上", 1_000_000, 1_160_000),
+            ("w004", "立刻", 1_160_000, 1_340_000),
+            ("w005", "滚", 1_340_000, 1_500_000),
+            ("w006", "去", 1_500_000, 1_740_000),
+            ("w007", "马上", 2_000_000, 2_160_000),
+            ("w008", "立刻", 2_160_000, 2_340_000),
+            ("w009", "滚", 2_340_000, 2_500_000),
+            ("w010", "下桌呢", 2_500_000, 3_000_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_840_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_740_000,
+                target_start_us=0,
+                target_end_us=1_740_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:6]],
+                text="那为什么你验资失败后马上立刻滚去",
+            ),
+            replace(
+                _segment(2, 1_740_000, 2_740_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=2_000_000,
+                source_end_us=3_000_000,
+                target_start_us=1_740_000,
+                target_end_us=2_740_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[6:]],
+                text="马上立刻滚下桌呢",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["那为什么你验资失败后", "马上立刻滚下桌呢"])
+        self.assertNotIn("马上立刻滚去", [caption.text for caption in result.captions])
+        self.assertIn("drop_partial_phrase_restart_span", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repairs_negative_filler_restart_inside_segment(self) -> None:
+        rows = [
+            ("w001", "你", 0, 120_000),
+            ("w002", "根本", 120_000, 320_000),
+            ("w003", "不", 320_000, 440_000),
+            ("w004", "就", 440_000, 560_000),
+            ("w005", "不", 560_000, 680_000),
+            ("w006", "知道", 680_000, 900_000),
+            ("w007", "什么", 900_000, 1_100_000),
+            ("w008", "叫", 1_100_000, 1_220_000),
+            ("w009", "爽", 1_220_000, 1_420_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_420_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_420_000,
+                target_start_us=0,
+                target_end_us=1_420_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="你根本不就不知道什么叫爽",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "你根本不知道什么叫爽")
+        self.assertEqual(
+            [word_id for segment in result.final_timeline for word_id in segment.word_ids],
+            ["w001", "w002", "w005", "w006", "w007", "w008", "w009"],
+        )
+        self.assertIn("drop_negative_predicate_restart_span", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repair_short_merge_refreshes_spoken_and_clip_bounds(self) -> None:
+        rows = [
+            ("w001", "这辈子没见过", 0, 1_500_000),
+            ("w002", "你", 1_500_000, 1_620_000),
+            ("w003", "根本", 1_620_000, 1_820_000),
+            ("w004", "不", 1_820_000, 1_940_000),
+            ("w005", "就", 1_940_000, 2_060_000),
+            ("w006", "不", 2_060_000, 2_180_000),
+            ("w007", "知道", 2_180_000, 2_400_000),
+            ("w008", "什么", 2_400_000, 2_600_000),
+            ("w009", "叫", 2_600_000, 2_720_000),
+            ("w010", "爽", 2_720_000, 3_120_000),
+            ("w011", "抱着", 3_420_000, 3_740_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_500_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_500_000,
+                target_start_us=0,
+                target_end_us=1_500_000,
+                word_ids=["w001"],
+                text="这辈子没见过",
+                spoken_source_start_us=0,
+                spoken_source_end_us=1_500_000,
+                clip_source_start_us=0,
+                clip_source_end_us=1_500_000,
+            ),
+            replace(
+                _segment(2, 1_500_000, 3_120_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_500_000,
+                source_end_us=3_120_000,
+                target_start_us=1_500_000,
+                target_end_us=3_120_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[1:10]],
+                text="你根本不就不知道什么叫爽",
+                spoken_source_start_us=1_500_000,
+                spoken_source_end_us=3_120_000,
+                clip_source_start_us=1_500_000,
+                clip_source_end_us=3_120_000,
+            ),
+            replace(
+                _segment(3, 3_120_000, 3_440_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=3_420_000,
+                source_end_us=3_740_000,
+                target_start_us=3_120_000,
+                target_end_us=3_440_000,
+                word_ids=["w011"],
+                text="抱着",
+                spoken_source_start_us=None,
+                spoken_source_end_us=None,
+                clip_source_start_us=None,
+                clip_source_end_us=None,
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["这辈子没见过你根本", "不知道什么叫爽抱着"])
+        merged_suffix = result.final_timeline[1]
+        self.assertEqual(merged_suffix.source_start_us, 2_060_000)
+        self.assertEqual(merged_suffix.source_end_us, 3_740_000)
+        self.assertEqual(merged_suffix.spoken_source_start_us, 2_060_000)
+        self.assertEqual(merged_suffix.spoken_source_end_us, 3_740_000)
+        self.assertEqual(merged_suffix.clip_source_start_us, 2_060_000)
+        self.assertEqual(merged_suffix.clip_source_end_us, 3_740_000)
+        self.assertEqual(merged_suffix.target_end_us - merged_suffix.target_start_us, 1_680_000)
+        self.assertIn("drop_negative_predicate_restart_span", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repairs_partial_boundary_restart_tail(self) -> None:
+        rows = [
+            ("w001", "任何", 0, 240_000),
+            ("w002", "一个", 240_000, 480_000),
+            ("w003", "四分", 480_000, 760_000),
+            ("w004", "女", 760_000, 960_000),
+            ("w005", "给", 1_000_000, 1_160_000),
+            ("w006", "你", 1_160_000, 1_300_000),
+            ("w007", "一", 1_300_000, 1_520_000),
+            ("w008", "给", 1_560_000, 1_720_000),
+            ("w009", "你", 1_720_000, 1_860_000),
+            ("w010", "四分", 1_940_000, 2_260_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_520_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_520_000,
+                target_start_us=0,
+                target_end_us=1_520_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:7]],
+                text="任何一个四分女给你一",
+            ),
+            replace(
+                _segment(2, 1_520_000, 2_220_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_560_000,
+                source_end_us=2_260_000,
+                target_start_us=1_520_000,
+                target_end_us=2_220_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[7:]],
+                text="给你四分",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["任何一个四分女", "给你四分"])
+        self.assertIn("boundary_restart", [action["issue_type"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repairs_source_tail_restart_before_unselected_completion(self) -> None:
+        rows = [
+            ("w001", "你", 0, 160_000),
+            ("w002", "都", 160_000, 320_000),
+            ("w003", "不知道", 320_000, 560_000),
+            ("w004", "是", 560_000, 720_000),
+            ("w005", "怎么", 720_000, 920_000),
+            ("w006", "输掉", 920_000, 1_240_000),
+            ("w007", "的", 1_240_000, 1_440_000),
+            ("w008", "你", 1_520_000, 1_680_000),
+            ("w009", "连", 1_680_000, 1_820_000),
+            ("w010", "死", 1_820_000, 1_980_000),
+            ("w011", "的", 2_060_000, 2_220_000),
+            ("w012", "你", 2_820_000, 2_980_000),
+            ("w013", "连", 2_980_000, 3_120_000),
+            ("w014", "怎么", 3_120_000, 3_360_000),
+            ("w015", "死", 3_360_000, 3_520_000),
+            ("w016", "都", 3_640_000, 3_920_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_220_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_220_000,
+                target_start_us=0,
+                target_end_us=2_220_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:11]],
+                text="你都不知道是怎么输掉的你连死的",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "你都不知道是怎么输掉的")
+        self.assertIn("boundary_restart", [action["issue_type"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_source_tail_restart_lookahead_uses_adjacent_word_gaps(self) -> None:
+        rows = [
+            ("w001", "主句", 0, 420_000),
+            ("w002", "你", 500_000, 660_000),
+            ("w003", "连", 660_000, 800_000),
+            ("w004", "错", 800_000, 960_000),
+            ("w005", "的", 1_080_000, 1_240_000),
+            ("w006", "你", 2_120_000, 2_280_000),
+            ("w007", "连", 2_280_000, 2_420_000),
+            ("w008", "怎么", 2_520_000, 2_760_000),
+            ("w009", "错", 2_760_000, 2_920_000),
+            ("w010", "都", 3_040_000, 3_260_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_240_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_240_000,
+                target_start_us=0,
+                target_end_us=1_240_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:5]],
+                text="主句你连错的",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "主句")
+        self.assertIn("boundary_restart", [action["issue_type"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_drops_short_whole_segment_abandoned_before_source_completion(self) -> None:
+        rows = [
+            ("w001", "保留", 0, 420_000),
+            ("w002", "甲", 700_000, 860_000),
+            ("w003", "乙", 860_000, 1_020_000),
+            ("w004", "丙", 1_020_000, 1_180_000),
+            ("w005", "甲", 1_300_000, 1_460_000),
+            ("w006", "丁", 1_620_000, 1_820_000),
+            ("w007", "甲", 2_100_000, 2_260_000),
+            ("w008", "乙", 2_260_000, 2_420_000),
+            ("w009", "丙", 2_420_000, 2_580_000),
+            ("w010", "完成", 2_620_000, 2_980_000),
+            ("w011", "继续", 3_240_000, 3_560_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 420_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=420_000,
+                target_start_us=0,
+                target_end_us=420_000,
+                word_ids=["w001"],
+                text="保留",
+            ),
+            replace(
+                _segment(2, 420_000, 1_540_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=700_000,
+                source_end_us=1_820_000,
+                target_start_us=420_000,
+                target_end_us=1_540_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[1:6]],
+                text="甲乙丙甲丁",
+            ),
+            replace(
+                _segment(3, 1_540_000, 1_860_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=3_240_000,
+                source_end_us=3_560_000,
+                target_start_us=1_540_000,
+                target_end_us=1_860_000,
+                word_ids=["w011"],
+                text="继续",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["保留", "继续"])
+        actions = result.report["timeline_repair_proposal_actions"]
+        self.assertEqual(actions[0]["target_segment_id"], "v21_seg_000002")
+        self.assertEqual(actions[0]["target_word_ids"], ["w002", "w003", "w004", "w005", "w006"])
+
+    def test_final_visible_repairs_next_prefix_duplicate_after_elided_restart_tail(self) -> None:
+        rows = [
+            ("w001", "前", 0, 160_000),
+            ("w002", "半", 160_000, 320_000),
+            ("w003", "尾", 320_000, 480_000),
+            ("w004", "甲", 480_000, 620_000),
+            ("w005", "前", 1_040_000, 1_200_000),
+            ("w006", "半", 1_200_000, 1_360_000),
+            ("w007", "尾", 1_360_000, 1_520_000),
+            ("w008", "甲", 1_520_000, 1_660_000),
+            ("w009", "继续", 1_860_000, 2_160_000),
+            ("w010", "推进", 2_160_000, 2_460_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 620_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=620_000,
+                target_start_us=0,
+                target_end_us=620_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:4]],
+                text="前半尾甲",
+            ),
+            replace(
+                _segment(2, 620_000, 1_700_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_520_000,
+                source_end_us=2_460_000,
+                target_start_us=620_000,
+                target_end_us=1_700_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[7:]],
+                text="甲继续推进",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["前半尾甲", "继续推进"])
+        actions = result.report["timeline_repair_proposal_actions"]
+        self.assertEqual(actions[0]["decision"], "suffix_trim")
+        self.assertEqual(actions[0]["target_segment_id"], "v21_seg_000002")
+        self.assertEqual(actions[0]["target_word_ids"], ["w008"])
+
+    def test_final_visible_repairs_command_shape_restart_after_elided_marker(self) -> None:
+        rows = [
+            ("w001", "从此", 0, 300_000),
+            ("w002", "拿", 320_000, 460_000),
+            ("w003", "甲", 460_000, 660_000),
+            ("w004", "让", 820_000, 980_000),
+            ("w005", "让", 1_060_000, 1_220_000),
+            ("w006", "甲", 1_220_000, 1_420_000),
+            ("w007", "拿", 1_420_000, 1_560_000),
+            ("w008", "任务", 1_560_000, 1_920_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 660_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=660_000,
+                target_start_us=0,
+                target_end_us=660_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:3]],
+                text="从此拿甲",
+            ),
+            replace(
+                _segment(2, 660_000, 1_520_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_060_000,
+                source_end_us=1_920_000,
+                target_start_us=660_000,
+                target_end_us=1_520_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[4:]],
+                text="让甲拿任务",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["从此", "让甲拿任务"])
+        actions = result.report["timeline_repair_proposal_actions"]
+        self.assertEqual(actions[0]["target_segment_id"], "v21_seg_000001")
+        self.assertEqual(actions[0]["target_word_ids"], ["w002", "w003"])
+
+    def test_final_visible_appends_truncated_compound_tail_from_source(self) -> None:
+        rows = [
+            ("w001", "那么", 0, 220_000),
+            ("w002", "就", 220_000, 340_000),
+            ("w003", "会", 340_000, 500_000),
+            ("w004", "瞬间", 500_000, 740_000),
+            ("w005", "触发", 820_000, 1_020_000),
+            ("w006", "波", 1_100_000, 1_140_000),
+            ("w007", "函数", 1_240_000, 1_440_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_140_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_140_000,
+                target_start_us=0,
+                target_end_us=1_140_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:6]],
+                text="那么就会瞬间触发波",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "那么就会瞬间触发波函数")
+        self.assertIn("append_source_boundary_compound_tail", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repairs_open_pronoun_preposition_tail(self) -> None:
+        rows = [
+            ("w001", "他", 0, 120_000),
+            ("w002", "发", 120_000, 260_000),
+            ("w003", "个", 260_000, 380_000),
+            ("w004", "精修", 420_000, 620_000),
+            ("w005", "的", 660_000, 780_000),
+            ("w006", "自拍", 780_000, 1_120_000),
+            ("w007", "你", 1_140_000, 1_300_000),
+            ("w008", "就", 1_300_000, 1_440_000),
+            ("w009", "躲", 1_480_000, 1_600_000),
+            ("w010", "在", 1_600_000, 1_860_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_860_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_860_000,
+                target_start_us=0,
+                target_end_us=1_860_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="他发个精修的自拍你就躲在",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "他发个精修的自拍")
+        self.assertIn("trim_dangling_suffix_tail", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_drops_short_weak_pronoun_fragment(self) -> None:
+        rows = [
+            ("w001", "就", 0, 220_000),
+            ("w002", "你", 220_000, 360_000),
+            ("w003", "以为", 360_000, 600_000),
+            ("w004", "你", 760_000, 960_000),
+            ("w005", "没人", 1_240_000, 1_520_000),
+            ("w006", "会", 1_520_000, 1_660_000),
+            ("w007", "在乎", 1_660_000, 1_860_000),
+            ("w008", "你", 1_900_000, 2_020_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 960_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=960_000,
+                target_start_us=0,
+                target_end_us=960_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[:4]],
+                text="就你以为你",
+            ),
+            replace(
+                _segment(2, 960_000, 1_740_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=1_240_000,
+                source_end_us=2_020_000,
+                target_start_us=960_000,
+                target_end_us=1_740_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows[4:]],
+                text="没人会在乎你",
+            ),
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual([segment.text for segment in result.final_timeline], ["没人会在乎你"])
+        self.assertIn("drop_dangling_weak_pronoun_fragment", [action["decision"] for action in result.report["final_visible_repair_actions"]])
+
+    def test_final_visible_repairs_strengthened_negative_restart_inside_segment(self) -> None:
+        rows = [
+            ("w001", "绝对", 0, 180_000),
+            ("w002", "不会", 180_000, 380_000),
+            ("w003", "绝不", 380_000, 600_000),
+            ("w004", "给", 600_000, 720_000),
+            ("w005", "任何", 720_000, 920_000),
+            ("w006", "一个", 920_000, 1_100_000),
+            ("w007", "看不上", 1_100_000, 1_460_000),
+            ("w008", "你", 1_460_000, 1_580_000),
+            ("w009", "的人", 1_580_000, 1_760_000),
+            ("w010", "买礼物", 1_760_000, 2_180_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_180_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_180_000,
+                target_start_us=0,
+                target_end_us=2_180_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="绝对不会绝不给任何一个看不上你的人买礼物",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "绝不给任何一个看不上你的人买礼物")
+        self.assertEqual(
+            [word_id for segment in result.final_timeline for word_id in segment.word_ids],
+            ["w003", "w004", "w005", "w006", "w007", "w008", "w009", "w010"],
+        )
+
+    def test_final_visible_accepts_intraword_duplicate_after_source_normalization(self) -> None:
+        rows = [
+            ("w001", "一一", 0, 220_000),
+            ("w002", "节", 220_000, 340_000),
+            ("w003", "课", 340_000, 460_000),
+            ("w004", "600", 460_000, 720_000),
+            ("w005", "块钱", 720_000, 980_000),
+            ("w006", "的", 980_000, 1_080_000),
+            ("w007", "普拉提", 1_080_000, 1_520_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_520_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_520_000,
+                target_start_us=0,
+                target_end_us=1_520_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="一一节课600块钱的普拉提",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(caption.text for caption in result.captions), "一节课600块钱的普拉提")
+        self.assertEqual(result.report["final_visible_repair_final_counts"]["semantic_garbage_or_asr_suspect_count"], 0)
+
+    def test_final_visible_repairs_short_prefix_self_correction_inside_segment(self) -> None:
+        rows = [
+            ("w001", "把", 0, 120_000),
+            ("w002", "生杀", 120_000, 340_000),
+            ("w003", "大权", 340_000, 560_000),
+            ("w004", "双手", 560_000, 780_000),
+            ("w005", "乖乖", 780_000, 1_000_000),
+            ("w006", "奉", 1_000_000, 1_120_000),
+            ("w007", "双手", 1_120_000, 1_340_000),
+            ("w008", "奉上", 1_340_000, 1_620_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 1_620_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=1_620_000,
+                target_start_us=0,
+                target_end_us=1_620_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="把生杀大权双手乖乖奉双手奉上",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "把生杀大权双手奉上")
+        self.assertEqual(
+            [word_id for segment in result.final_timeline for word_id in segment.word_ids],
+            ["w001", "w002", "w003", "w007", "w008"],
+        )
+
+    def test_final_visible_repairs_abandoned_clause_before_restarted_prefix(self) -> None:
+        rows = [
+            ("w001", "你", 0, 120_000),
+            ("w002", "被", 120_000, 240_000),
+            ("w003", "爆", 240_000, 360_000),
+            ("w004", "完", 360_000, 480_000),
+            ("w005", "了", 480_000, 600_000),
+            ("w006", "金币", 600_000, 880_000),
+            ("w007", "那", 880_000, 1_000_000),
+            ("w008", "导师", 1_000_000, 1_240_000),
+            ("w009", "呢", 1_240_000, 1_360_000),
+            ("w010", "你", 1_360_000, 1_480_000),
+            ("w011", "被", 1_480_000, 1_600_000),
+            ("w012", "爆", 1_600_000, 1_720_000),
+            ("w013", "完", 1_720_000, 1_840_000),
+            ("w014", "的", 1_840_000, 1_960_000),
+            ("w015", "金币", 1_960_000, 2_240_000),
+            ("w016", "那", 2_240_000, 2_360_000),
+            ("w017", "导致", 2_360_000, 2_600_000),
+            ("w018", "呢", 2_600_000, 2_720_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        timeline = [
+            replace(
+                _segment(1, 0, 2_720_000),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=0,
+                source_end_us=2_720_000,
+                target_start_us=0,
+                target_end_us=2_720_000,
+                word_ids=[word_id for word_id, _text, _start, _end in rows],
+                text="你被爆完了金币那导师呢你被爆完的金币那导致呢",
+            )
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"])
+        self.assertEqual("".join(segment.text for segment in result.final_timeline), "你被爆完的金币那导致呢")
+        self.assertEqual(
+            [word_id for segment in result.final_timeline for word_id in segment.word_ids],
+            ["w010", "w011", "w012", "w013", "w014", "w015", "w016", "w017", "w018"],
+        )
 
     def test_final_visible_repairs_cross_caption_containment_by_dropping_shorter_repeat(self) -> None:
         rows = [

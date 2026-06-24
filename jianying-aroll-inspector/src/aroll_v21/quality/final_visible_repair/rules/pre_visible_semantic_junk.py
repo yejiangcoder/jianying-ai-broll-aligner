@@ -6,18 +6,19 @@ def configure_rule_dependencies(dependencies: dict[str, Any]) -> None:
     globals().update(dependencies)
 
 
-MAX_ISOLATED_SHORT_FRAGMENT_CHARS = 3
+MAX_ISOLATED_SHORT_FRAGMENT_CHARS = 4
 
 
-MAX_ISOLATED_SHORT_FRAGMENT_DURATION_US = 900_000
+MAX_ISOLATED_SHORT_FRAGMENT_DURATION_US = 1_200_000
 
 
 MIN_ISOLATED_SHORT_FRAGMENT_SOURCE_GAP_US = 300_000
 
 
-MIN_ISOLATED_SHORT_FRAGMENT_NEIGHBOR_CHARS = 6
+MIN_ISOLATED_SHORT_FRAGMENT_NEIGHBOR_CHARS = 5
 ACTION_ASPECT_TAILS = ("着", "了", "过")
 DEPENDENT_OBJECT_HEAD_PREFIXES = tuple("个件条张节款台辆本套部名位份颗枚只")
+LOW_INFORMATION_FRAGMENT_TAILS = ("的", "就", "是", "在", "把", "给", "去", "来", "这个", "那个")
 
 
 def _repair_pre_visible_semantic_junk_candidate(
@@ -93,6 +94,8 @@ def _is_deterministic_pre_visible_semantic_junk_drop(candidate: dict[str, Any]) 
         "aborted_restart",
         "adjacent_reordered_semantic_restart",
         "adjacent_suffix_semantic_recurrence",
+        "lookahead_contained_short_fragment",
+        "lookahead_nominal_restart_fragment",
         "prefix_restart",
         "standalone_topic_prefix_restart",
     }:
@@ -162,6 +165,8 @@ def _is_isolated_short_source_gap_fragment(
         return False
     if not text or not all("\u4e00" <= char <= "\u9fff" for char in text):
         return False
+    if len(text) > 3 and not _looks_like_low_information_isolated_fragment(text):
+        return False
     duration_us = int(caption.target_end_us) - int(caption.target_start_us)
     if duration_us <= 0 or duration_us > MAX_ISOLATED_SHORT_FRAGMENT_DURATION_US:
         return False
@@ -196,3 +201,7 @@ def _looks_like_action_fragment_before_dependent_object(text: str, next_text: st
     if not text.endswith(ACTION_ASPECT_TAILS):
         return False
     return next_text[0] in DEPENDENT_OBJECT_HEAD_PREFIXES
+
+
+def _looks_like_low_information_isolated_fragment(text: str) -> bool:
+    return any(text.endswith(tail) for tail in LOW_INFORMATION_FRAGMENT_TAILS)

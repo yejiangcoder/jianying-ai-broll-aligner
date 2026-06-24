@@ -425,6 +425,7 @@ def request_from_self_repair_segments(
         allowed_decisions=[
             SemanticAdjudicationDecisionType.DROP_ABORTED.value,
             SemanticAdjudicationDecisionType.DROP_LEFT.value,
+            SemanticAdjudicationDecisionType.DROP_RIGHT.value,
             SemanticAdjudicationDecisionType.REQUIRES_HUMAN_REVIEW.value,
             SemanticAdjudicationDecisionType.NO_DECISION.value,
         ],
@@ -665,6 +666,7 @@ def _allowed_decisions(issue_type: SemanticIssueType, severity: SemanticIssueSev
         return [
             SemanticAdjudicationDecisionType.DROP_ABORTED.value,
             SemanticAdjudicationDecisionType.DROP_LEFT.value,
+            SemanticAdjudicationDecisionType.DROP_RIGHT.value,
             SemanticAdjudicationDecisionType.REQUIRES_HUMAN_REVIEW.value,
             SemanticAdjudicationDecisionType.NO_DECISION.value,
         ]

@@ -215,25 +215,5 @@ def _merge_timeline_segment_pair_at(
 ) -> list[FinalTimelineSegment]:
     left = segments[index]
     right = segments[index + 1]
-    merged_word_ids = [*left.word_ids, *right.word_ids]
-    text = _text_from_word_ids(merged_word_ids, source_graph) or f"{left.text}{right.text}"
-    source_start_us = int(left.source_start_us)
-    source_end_us = int(right.source_end_us)
-    target_duration_us = max(1, source_end_us - source_start_us)
-    merged = replace(
-        left,
-        source_end_us=source_end_us,
-        target_end_us=int(left.target_start_us) + target_duration_us,
-        word_ids=merged_word_ids,
-        text=text,
-        decision_ids=_unique([*left.decision_ids, *right.decision_ids]),
-        spoken_source_end_us=right.spoken_source_end_us if right.spoken_source_end_us is not None else left.spoken_source_end_us,
-        clip_source_end_us=right.clip_source_end_us if right.clip_source_end_us is not None else left.clip_source_end_us,
-        tail_handle_us=max(int(left.tail_handle_us), int(right.tail_handle_us)),
-        debug_hints={
-            **dict(left.debug_hints or {}),
-            "final_visible_repair": repair_reason,
-            "merged_segment_ids": [left.segment_id, right.segment_id],
-        },
-    )
+    merged = _merged_segment_pair_preserving_effective_speed(left, right, source_graph, repair_reason)
     return [*segments[:index], merged, *segments[index + 2 :]]

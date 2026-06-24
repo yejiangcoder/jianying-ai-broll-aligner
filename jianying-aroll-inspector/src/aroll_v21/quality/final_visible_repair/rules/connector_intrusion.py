@@ -37,6 +37,15 @@ MIN_REPEATED_OBJECT_HEAD_GAP_US = 120_000
 MIN_REPEATED_OBJECT_REMAINING_CHARS = 6
 
 
+COMPLETED_PREDICATE_PREFIXES = ("全是", "都是", "全都是", "全部是", "尽是", "就是")
+
+
+MIN_COMPLETED_PREDICATE_RESTART_PREFIX_CHARS = 3
+
+
+MIN_COMPLETED_PREDICATE_RESTART_SHARED_CHARS = 2
+
+
 def _repair_connector_single_word_intrusion(
     *,
     final_timeline: list[FinalTimelineSegment],
@@ -165,6 +174,112 @@ def _repair_connector_filler_restart(
             )
     no_step: _RepairStep | None = None
     return no_step
+
+
+def _repair_subject_prefix_completed_predicate_restart(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    ordered = _ordered_segments(final_timeline)
+    for left, right in zip(ordered, ordered[1:]):
+        candidate = _subject_prefix_completed_predicate_restart_candidate(left, right, words_by_id)
+        if candidate is None:
+            continue
+        repaired = _drop_contiguous_word_ids_from_timeline(
+            final_timeline,
+            source_graph,
+            list(candidate["drop_word_ids"]),
+            "subject_prefix_completed_predicate_restart",
+        )
+        if repaired is None:
+            continue
+        return _RepairStep(
+            final_timeline=repaired,
+            captions=[],
+            timeline_changed=True,
+            action=_action(
+                "subject_prefix_completed_predicate_restart",
+                "trim_abandoned_predicate_after_subject_prefix",
+                pass_index,
+                {
+                    "caption_id": "",
+                    "related_caption_id": "",
+                    "reason": "subject prefix is followed by an abandoned predicate before the next segment completes it",
+                    "overlap_text": str(candidate["shared_text"]),
+                },
+                affected_segment_ids=[left.segment_id, right.segment_id],
+                preserved_prefix_word_ids=list(candidate["prefix_word_ids"]),
+                preserved_prefix_text=str(candidate["prefix_text"]),
+                dropped_word_ids=list(candidate["drop_word_ids"]),
+                dropped_text=str(candidate["drop_text"]),
+                completed_predicate_segment_id=right.segment_id,
+                completed_predicate_prefix=str(candidate["completed_prefix"]),
+            ),
+        )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _subject_prefix_completed_predicate_restart_candidate(
+    left: FinalTimelineSegment,
+    right: FinalTimelineSegment,
+    words_by_id: dict[str, Any],
+) -> dict[str, Any] | None:
+    left_ids = [str(word_id) for word_id in list(left.word_ids or []) if str(word_id)]
+    right_ids = [str(word_id) for word_id in list(right.word_ids or []) if str(word_id)]
+    if len(left_ids) < 4 or len(right_ids) < 3:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    left_words = [words_by_id.get(word_id) for word_id in left_ids]
+    right_words = [words_by_id.get(word_id) for word_id in right_ids]
+    if any(word is None for word in [*left_words, *right_words]):
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    left_texts = [normalize_text(str(getattr(word, "text", "") or "")) for word in left_words]
+    right_texts = [normalize_text(str(getattr(word, "text", "") or "")) for word in right_words]
+    completed_prefix_len = _completed_predicate_prefix_word_count(right_texts)
+    if completed_prefix_len <= 0:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    right_tail = normalize_text("".join(right_texts[completed_prefix_len:]))
+    if len(right_tail) < MIN_COMPLETED_PREDICATE_RESTART_SHARED_CHARS + 1:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    for marker_index in range(len(left_texts) - 1):
+        marker = left_texts[marker_index]
+        if marker != "是":
+            continue
+        prefix_text = normalize_text("".join(left_texts[:marker_index]))
+        left_tail = normalize_text("".join(left_texts[marker_index + 1 :]))
+        if len(prefix_text) < MIN_COMPLETED_PREDICATE_RESTART_PREFIX_CHARS:
+            continue
+        if len(left_tail) < MIN_COMPLETED_PREDICATE_RESTART_SHARED_CHARS:
+            continue
+        if not right_tail.startswith(left_tail):
+            continue
+        return {
+            "prefix_word_ids": left_ids[:marker_index],
+            "prefix_text": prefix_text,
+            "drop_word_ids": left_ids[marker_index:],
+            "drop_text": normalize_text("".join(left_texts[marker_index:])),
+            "shared_text": left_tail,
+            "completed_prefix": normalize_text("".join(right_texts[:completed_prefix_len])),
+        }
+    no_candidate: dict[str, Any] | None = None
+    return no_candidate
+
+
+def _completed_predicate_prefix_word_count(texts: list[str]) -> int:
+    joined = ""
+    max_count = min(4, len(texts))
+    for count in range(1, max_count + 1):
+        joined += normalize_text(texts[count - 1])
+        if joined in COMPLETED_PREDICATE_PREFIXES:
+            return count
+    return 0
 
 
 def _repair_repeated_object_head_tail(

@@ -171,3 +171,4 @@ def write_run_artifacts(run_report: RunReport, output_dir: Path, *, report_profi
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(artifact_path, "wt", encoding="utf-8") as f:
             json.dump(dataclass_to_dict(payload), f, ensure_ascii=False, separators=(",", ":"))
+

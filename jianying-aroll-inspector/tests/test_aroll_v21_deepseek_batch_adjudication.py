@@ -343,8 +343,9 @@ class ArollV21DeepSeekBatchAdjudicationTests(unittest.TestCase):
         with patch("urllib.request.urlopen", new=responder):
             provider.decide([_request(f"issue_{index}") for index in range(19)])
 
-        self.assertEqual(provider.provider_called_count, 1)
-        self.assertEqual(provider.deepseek_batch_request_count, 1)
+        self.assertEqual(provider.provider_called_count, 4)
+        self.assertEqual(provider.deepseek_batch_request_count, 4)
+        self.assertEqual(provider.deepseek_batch_chunk_sizes, [6, 6, 6, 1])
         self.assertEqual(provider.deepseek_batch_issue_count, 19)
         self.assertEqual(provider.deepseek_batch_resolved_count, 19)
 

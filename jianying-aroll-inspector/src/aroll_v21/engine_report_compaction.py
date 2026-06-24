@@ -50,3 +50,4 @@ def _resolved_semantic_decision_rows(decision_plan) -> list[dict[str, Any]]:
         rows.append(dict(row))
         seen.add(cluster_id)
     return rows
+

@@ -128,7 +128,7 @@ class DynamicSourceBindingPreflight:
             allow_preserve_unsupported_effect_tracks=self.allow_preserve_unsupported_effect_tracks,
         )
         if not result.safe:
-            raise PreflightError(result.blocker_code, result.blocker_message, {"filter_preflight": result.report})
+            raise PreflightError(result.blocker_code, result.blocker_message, {"filter_preflight": result.report}) 
         return {"filter_preflight": result.report}
 
     def _root_mirror_preflight(

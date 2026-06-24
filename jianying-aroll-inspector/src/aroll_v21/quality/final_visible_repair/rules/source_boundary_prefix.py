@@ -35,6 +35,17 @@ SOURCE_BOUNDARY_COMPOUND_SUFFIXES = (
 )
 
 
+LEGAL_REDUPLICATION_AMOUNT_UNITS = tuple("个只件台部杯瓶份次块元毛角分钱万千百十亿年月天小时分钟公里米斤克岁平")
+LEGAL_REDUPLICATION_NUMERAL_PREFIXES = tuple("零〇一二两三四五六七八九十百千万亿半几多0123456789")
+LEGAL_REDUPLICATION_FALSE_START_SINGLE_CHARS = set("我你他她它这那就会又也还再都才要想能该")
+MAX_OMITTED_REDUPLICATION_SOURCE_GAP_US = 220_000
+
+
+TRUNCATED_COMPOUND_TAIL_MAX_GAP_US = 180_000
+TRUNCATED_COMPOUND_TAIL_MAX_WORD_DURATION_US = 160_000
+TRUNCATED_COMPOUND_TAIL_EXCLUDED_CHARS = set("的一了着过啊呢吗吧嘛就都也")
+
+
 MIN_TRANSFERRED_PREFIX_TARGET_US = 80_000
 
 
@@ -222,6 +233,112 @@ def _repair_source_boundary_prefix_gap(
     return no_step
 
 
+def _repair_omitted_legal_reduplication_word(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    ordered_words = list(source_graph.words)
+    index_by_word_id = {word.word_id: index for index, word in enumerate(ordered_words)}
+    selected_word_ids = {str(word_id) for segment in final_timeline for word_id in list(segment.word_ids or [])}
+    for segment in _ordered_segments(final_timeline):
+        segment_word_ids = [str(word_id) for word_id in list(segment.word_ids or []) if str(word_id)]
+        for position, word_id in enumerate(segment_word_ids):
+            word = words_by_id.get(word_id)
+            source_index = index_by_word_id.get(word_id)
+            if word is None or source_index is None or source_index <= 0:
+                continue
+            previous_word = ordered_words[source_index - 1]
+            previous_word_id = str(getattr(previous_word, "word_id", "") or "")
+            if not previous_word_id or previous_word_id in selected_word_ids:
+                continue
+            if not _omitted_legal_reduplication_pair(previous_word, word, segment_word_ids[position + 1 :], words_by_id):
+                continue
+            repaired_word_ids = [*segment_word_ids[:position], previous_word_id, *segment_word_ids[position:]]
+            repaired_segment = _segment_with_word_ids_preserving_effective_speed(
+                segment,
+                repaired_word_ids,
+                source_graph,
+                "restore_omitted_legal_reduplication",
+            )
+            if repaired_segment is None:
+                continue
+            repaired = [
+                repaired_segment if row.segment_id == segment.segment_id else row
+                for row in final_timeline
+            ]
+            return _RepairStep(
+                final_timeline=repaired,
+                captions=[],
+                timeline_changed=True,
+                action=_action(
+                    "omitted_legal_reduplication",
+                    "restore_omitted_legal_reduplication_word",
+                    pass_index,
+                    {
+                        "caption_id": "",
+                        "related_caption_id": "",
+                        "reason": "source graph contains a legal reduplication before an amount or modifier suffix but the first token was omitted",
+                        "overlap_text": normalize_text(str(getattr(word, "text", "") or "")),
+                    },
+                    affected_segment_id=segment.segment_id,
+                    inserted_word_id=previous_word_id,
+                    inserted_text=str(getattr(previous_word, "text", "") or ""),
+                    before_word_id=word_id,
+                    repaired_word_ids=repaired_word_ids,
+                ),
+            )
+    no_step: _RepairStep | None = None
+    return no_step
+
+
+def _omitted_legal_reduplication_pair(
+    previous_word: Any,
+    current_word: Any,
+    following_word_ids: list[str],
+    words_by_id: dict[str, Any],
+) -> bool:
+    previous_text = normalize_text(str(getattr(previous_word, "text", "") or ""))
+    current_text = normalize_text(str(getattr(current_word, "text", "") or ""))
+    if not previous_text or previous_text != current_text:
+        return False
+    if len(previous_text) == 1 and previous_text in LEGAL_REDUPLICATION_FALSE_START_SINGLE_CHARS:
+        return False
+    if not all("\u3400" <= char <= "\u9fff" for char in previous_text):
+        return False
+    previous_end = int(getattr(previous_word, "source_end_us", 0) or 0)
+    current_start = int(getattr(current_word, "source_start_us", 0) or 0)
+    if current_start < previous_end or current_start - previous_end > MAX_OMITTED_REDUPLICATION_SOURCE_GAP_US:
+        return False
+    if str(getattr(previous_word, "source_material_id", "") or "") != str(getattr(current_word, "source_material_id", "") or ""):
+        return False
+    if str(getattr(previous_word, "source_segment_id", "") or "") != str(getattr(current_word, "source_segment_id", "") or ""):
+        return False
+    following_text = normalize_text(
+        "".join(
+            str(getattr(words_by_id[word_id], "text", "") or "")
+            for word_id in following_word_ids[:4]
+            if word_id in words_by_id
+        )
+    )
+    return _legal_reduplication_following_text(following_text)
+
+
+def _legal_reduplication_following_text(following_text: str) -> bool:
+    if not following_text:
+        return False
+    if following_text.startswith(("的", "地", "得")):
+        return True
+    if following_text[0] not in LEGAL_REDUPLICATION_NUMERAL_PREFIXES:
+        return False
+    tail = following_text[1:8]
+    if not tail:
+        return False
+    return any(char in LEGAL_REDUPLICATION_AMOUNT_UNITS for char in tail)
+
+
 def _source_boundary_prefix_candidate(
     segment: FinalTimelineSegment,
     final_timeline: list[FinalTimelineSegment],
@@ -327,6 +444,130 @@ def _repair_source_boundary_compound_suffix_gap(
     )
 
 
+def _repair_source_boundary_truncated_compound_tail(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    pass_index: int,
+) -> _RepairStep | None:
+    candidate = _source_boundary_truncated_compound_tail_candidate(final_timeline, source_graph)
+    if candidate is None:
+        no_step: _RepairStep | None = None
+        return no_step
+    segment = candidate["segment"]
+    appended_word_id = str(candidate["append_word_id"])
+    repaired_segment = _segment_with_word_ids_preserving_effective_speed(
+        segment,
+        [*list(segment.word_ids), appended_word_id],
+        source_graph,
+        "source_boundary_truncated_compound_tail_append",
+    )
+    if repaired_segment is None:
+        no_step: _RepairStep | None = None
+        return no_step
+    repaired = [
+        repaired_segment if row.segment_id == segment.segment_id else row
+        for row in final_timeline
+    ]
+    return _RepairStep(
+        final_timeline=repaired,
+        captions=[],
+        timeline_changed=True,
+        action=_action(
+            "source_boundary_truncated_compound_tail",
+            "append_source_boundary_compound_tail",
+            pass_index,
+            {
+                "caption_id": "",
+                "related_caption_id": "",
+                "reason": "single-character lexical tail is immediately completed by the next source word",
+                "overlap_text": str(candidate["tail_text"]),
+            },
+            affected_segment_ids=[segment.segment_id],
+            appended_word_id=appended_word_id,
+            appended_word_text=str(candidate["append_word_text"]),
+            source_gap_us=int(candidate["source_gap_us"]),
+        ),
+    )
+
+
+def _source_boundary_truncated_compound_tail_candidate(
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+) -> dict[str, Any] | None:
+    used_word_ids = {str(word_id) for segment in final_timeline for word_id in list(segment.word_ids)}
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    ordered_words = sorted(
+        source_graph.words,
+        key=lambda word: (int(getattr(word, "source_start_us", 0) or 0), int(getattr(word, "source_end_us", 0) or 0)),
+    )
+    for segment in _ordered_segments(final_timeline):
+        if not segment.word_ids:
+            continue
+        tail_word_id = str(segment.word_ids[-1])
+        tail_word = words_by_id.get(tail_word_id)
+        if tail_word is None:
+            continue
+        tail_text = normalize_text(str(getattr(tail_word, "text", "") or ""))
+        if len(tail_text) != 1 or tail_text in TRUNCATED_COMPOUND_TAIL_EXCLUDED_CHARS:
+            continue
+        tail_duration_us = int(getattr(tail_word, "source_end_us", 0) or 0) - int(getattr(tail_word, "source_start_us", 0) or 0)
+        if tail_duration_us <= 0 or tail_duration_us > TRUNCATED_COMPOUND_TAIL_MAX_WORD_DURATION_US:
+            continue
+        next_word = _next_unselected_source_word(tail_word, ordered_words, used_word_ids)
+        if next_word is None:
+            continue
+        next_text = normalize_text(str(getattr(next_word, "text", "") or ""))
+        if len(next_text) < 2:
+            continue
+        return {
+            "segment": segment,
+            "append_word_id": str(getattr(next_word, "word_id", "") or ""),
+            "append_word_text": str(getattr(next_word, "text", "") or ""),
+            "tail_text": tail_text,
+            "source_gap_us": int(getattr(next_word, "source_start_us", 0) or 0) - int(getattr(tail_word, "source_end_us", 0) or 0),
+        }
+    no_candidate: dict[str, Any] | None = None
+    return no_candidate
+
+
+def _next_unselected_source_word(
+    tail_word: Any,
+    ordered_words: list[Any],
+    used_word_ids: set[str],
+) -> Any | None:
+    tail_end_us = int(getattr(tail_word, "source_end_us", 0) or 0)
+    tail_material = str(getattr(tail_word, "source_material_id", "") or "")
+    tail_segment = str(getattr(tail_word, "source_segment_id", "") or "")
+    tail_subtitle_uid = str(getattr(tail_word, "subtitle_uid", "") or "")
+    tail_subtitle_index = getattr(tail_word, "subtitle_index", None)
+    for word in ordered_words:
+        word_id = str(getattr(word, "word_id", "") or "")
+        if not word_id or word_id in used_word_ids:
+            continue
+        word_start_us = int(getattr(word, "source_start_us", 0) or 0)
+        if word_start_us < tail_end_us:
+            continue
+        gap_us = word_start_us - tail_end_us
+        if gap_us > TRUNCATED_COMPOUND_TAIL_MAX_GAP_US:
+            break
+        if tail_material and str(getattr(word, "source_material_id", "") or "") not in {"", tail_material}:
+            continue
+        if tail_segment and str(getattr(word, "source_segment_id", "") or "") not in {"", tail_segment}:
+            continue
+        word_subtitle_uid = str(getattr(word, "subtitle_uid", "") or "")
+        word_subtitle_index = getattr(word, "subtitle_index", None)
+        same_subtitle = (
+            bool(tail_subtitle_uid and word_subtitle_uid and tail_subtitle_uid == word_subtitle_uid)
+            or (tail_subtitle_index is not None and tail_subtitle_index == word_subtitle_index)
+        )
+        if not same_subtitle:
+            continue
+        return word
+    no_word: Any | None = None
+    return no_word
+
+
 def _source_boundary_compound_candidate(
     final_timeline: list[FinalTimelineSegment],
     source_graph: CanonicalSourceGraph,
@@ -390,26 +631,11 @@ def _merge_source_boundary_compound_segments(
     if left_index is None or right_index is None or right_index != left_index + 1:
         no_repair: list[FinalTimelineSegment] | None = None
         return no_repair
-    merged_word_ids = [*left.word_ids, *right.word_ids]
-    text = _text_from_word_ids(merged_word_ids, source_graph) or f"{left.text}{right.text}"
-    source_start_us = int(left.source_start_us)
-    source_end_us = int(right.source_end_us)
-    target_duration_us = max(1, source_end_us - source_start_us)
-    merged = replace(
+    merged = _merged_segment_pair_preserving_effective_speed(
         left,
-        source_end_us=source_end_us,
-        target_end_us=int(left.target_start_us) + target_duration_us,
-        word_ids=merged_word_ids,
-        text=text,
-        decision_ids=_unique([*left.decision_ids, *right.decision_ids]),
-        spoken_source_end_us=right.spoken_source_end_us if right.spoken_source_end_us is not None else left.spoken_source_end_us,
-        clip_source_end_us=right.clip_source_end_us if right.clip_source_end_us is not None else left.clip_source_end_us,
-        tail_handle_us=max(int(left.tail_handle_us), int(right.tail_handle_us)),
-        debug_hints={
-            **dict(left.debug_hints or {}),
-            "final_visible_repair": "source_boundary_compound_suffix_merge",
-            "merged_segment_ids": [left.segment_id, right.segment_id],
-        },
+        right,
+        source_graph,
+        "source_boundary_compound_suffix_merge",
     )
     return [*final_timeline[:left_index], merged, *final_timeline[right_index + 1 :]]
 

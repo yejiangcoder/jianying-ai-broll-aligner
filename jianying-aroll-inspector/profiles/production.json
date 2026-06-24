@@ -14,6 +14,6 @@
   "preflight_only": false,
   "regression_profile": "report_only",
   "regression_fatal": false,
-  "semantic_arbiter_model": "deepseek-chat",
+  "semantic_arbiter_model": "deepseek-v4-pro",
   "max_semantic_repair_iterations": 3
 }

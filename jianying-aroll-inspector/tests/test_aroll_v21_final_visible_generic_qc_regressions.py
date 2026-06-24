@@ -109,6 +109,22 @@ class FinalVisibleGenericQcRegressionTests(unittest.TestCase):
         self.assertEqual(graph.words[0].text, "看看")
         self.assertFalse(graph.words[0].debug_hints.get("intraword_cjk_restart_normalized", False))
 
+    def test_intraword_repeated_numeral_before_classifier_is_normalized(self) -> None:
+        graph = _graph(
+            [
+                ("w001", "一一", 0, 220_000, 1),
+                ("w002", "节", 220_000, 340_000, 1),
+                ("w003", "课", 340_000, 460_000, 1),
+                ("w004", "600块钱的普拉提", 460_000, 1_400_000, 1),
+            ]
+        )
+
+        self.assertEqual(graph.words[0].text, "一")
+        self.assertEqual(graph.words[0].source_start_us, 110_000)
+        self.assertEqual(graph.edit_units[0].text, "一节课600块钱的普拉提")
+        self.assertTrue(graph.words[0].debug_hints["intraword_cjk_restart_normalized"])
+        self.assertEqual(graph.words[0].debug_hints["normalization_reason"], "leading_repeated_numeral_before_classifier")
+
     def test_prefixed_reduplicated_lexeme_is_not_intraword_restart_normalized(self) -> None:
         graph = _graph(
             [

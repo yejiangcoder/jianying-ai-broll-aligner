@@ -119,6 +119,43 @@ class ArollV21FinalTargetRepeatResolverTests(unittest.TestCase):
         self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, [])
         self.assertTrue(plan.write_allowed)
 
+    def test_final_target_repeat_does_not_consume_non_final_payload_by_text_pair(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        plan.semantic_request_payloads.append(
+            {
+                "cluster_id": "repeat_0001",
+                "issue_id": "repeat_0001",
+                "type": "self_repair_aborted_phrase",
+                "left_text": "自信的人能拿到结果",
+                "right_text": "自信的人真的能拿到结果",
+            }
+        )
+        plan.semantic_decision_rows.append(
+            {
+                "cluster_id": "repeat_0001",
+                "_blocker_code": "V21_SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW",
+                "_severity": "write_blocker",
+                "_message": "non-final repeat requires human review",
+                "_decision": "requires_human_review",
+            }
+        )
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [segment(1, "自信的人能拿到结果"), segment(2, "自信的人真的能拿到结果")],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([row.text for row in final_timeline], ["自信的人能拿到结果", "自信的人真的能拿到结果"])
+        self.assertTrue(
+            any(
+                row.get("type") == "final_target_repeat"
+                and row.get("cluster_id") == "final_target_repeat_tc_0001"
+                for row in plan.semantic_request_payloads
+            )
+        )
+        self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, ["final_target_repeat_tc_0001"])
+
     def test_final_target_repeat_consumes_provider_decision_by_text_pair_when_cluster_id_drifts(self) -> None:
         plan = DecisionPlan(decisions=[])
         plan.semantic_request_payloads.append(

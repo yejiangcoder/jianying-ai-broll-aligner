@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from aroll_v21 import ArollEngine
-from aroll_v21.ir import FinalTimelineSegment
+from aroll_v21.ir import CaptionRenderUnit, FinalTimelineSegment
 from aroll_v21.quality.pre_visible_semantic_junk_candidate_detector import build_pre_visible_semantic_junk_candidate_report
 from aroll_v21.quality.final_visible_caption_repair import repair_final_visible_caption_issues
 from aroll_v21.render.subtitle_renderer import SubtitleRenderer
@@ -131,6 +131,114 @@ class PreVisibleSemanticJunkTest(unittest.TestCase):
         report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
 
         self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 0, report)
+
+    def test_nominal_fragment_completing_previous_identity_clause_is_not_dropped(self) -> None:
+        rows = [
+            ("w001", "他", 0, 40_000),
+            ("w002", "这", 80_000, 200_000),
+            ("w003", "具", 280_000, 320_000),
+            ("w004", "肉体", 440_000, 680_000),
+            ("w005", "就是", 840_000, 1_200_000),
+            ("w006", "他", 1_200_000, 1_320_000),
+            ("w007", "手里", 1_333_333, 1_653_333),
+            ("w008", "唯一", 1_733_333, 1_973_333),
+            ("w009", "能", 1_973_333, 2_173_333),
+            ("w010", "上桌", 2_173_333, 2_453_333),
+            ("w011", "的", 2_533_333, 2_693_333),
+            ("w012", "筹码", 2_693_333, 3_166_667),
+            ("w013", "他", 3_466_667, 3_546_667),
+            ("w014", "就是", 3_626_667, 3_866_667),
+            ("w015", "要", 3_866_667, 3_986_667),
+            ("w016", "用", 3_986_667, 4_146_667),
+            ("w017", "这个", 4_266_667, 4_500_000),
+            ("w018", "唯一", 4_500_000, 4_700_000),
+            ("w019", "的", 4_700_000, 4_820_000),
+            ("w020", "筹码", 4_860_000, 5_020_000),
+            ("w021", "去", 5_060_000, 5_220_000),
+            ("w022", "唯一", 5_500_000, 5_700_000),
+            ("w023", "的", 5_700_000, 5_820_000),
+            ("w024", "筹码", 5_860_000, 6_020_000),
+            ("w025", "去", 6_060_000, 6_220_000),
+            ("w026", "加", 6_220_000, 6_380_000),
+            ("w027", "杠杆", 6_460_000, 6_860_000),
+        ]
+        source_graph = _graph_for_rows(rows)
+        timeline = [
+            _multi_segment(1, [f"w{index:03d}" for index in range(1, 7)], "他这具肉体就是他", 0, 1_320_000),
+            _multi_segment(
+                2,
+                [f"w{index:03d}" for index in range(7, 13)],
+                "手里唯一能上桌的筹码",
+                1_333_333,
+                3_166_667,
+            ),
+            _multi_segment(
+                3,
+                [f"w{index:03d}" for index in range(22, 28)],
+                "唯一的筹码去加杠杆",
+                5_500_000,
+                6_860_000,
+            ),
+        ]
+        captions = [
+            CaptionRenderUnit(
+                caption_id="v21_cap_000001",
+                timeline_segment_ids=["v21_seg_000001"],
+                word_ids=[f"w{index:03d}" for index in range(1, 7)],
+                text="他这具肉体就是他",
+                target_start_us=0,
+                target_end_us=1_320_000,
+                source_subtitle_uids=[f"s{index:03d}" for index in range(1, 7)],
+                style_template_id="canonical_caption_template",
+                containing_video_segment_id="v21_seg_000001",
+            ),
+            CaptionRenderUnit(
+                caption_id="v21_cap_000002",
+                timeline_segment_ids=["v21_seg_000002"],
+                word_ids=[f"w{index:03d}" for index in range(7, 13)],
+                text="手里唯一能上桌的筹码",
+                target_start_us=1_333_333,
+                target_end_us=3_166_667,
+                source_subtitle_uids=[f"s{index:03d}" for index in range(7, 13)],
+                style_template_id="canonical_caption_template",
+                containing_video_segment_id="v21_seg_000002",
+            ),
+            CaptionRenderUnit(
+                caption_id="v21_cap_000003",
+                timeline_segment_ids=["v21_seg_000003"],
+                word_ids=[f"w{index:03d}" for index in range(22, 28)],
+                text="唯一的筹码去加杠杆",
+                target_start_us=5_500_000,
+                target_end_us=6_860_000,
+                source_subtitle_uids=[f"s{index:03d}" for index in range(22, 28)],
+                style_template_id="canonical_caption_template",
+                containing_video_segment_id="v21_seg_000003",
+            ),
+        ]
+
+        report = build_pre_visible_semantic_junk_candidate_report(captions, source_graph)
+
+        self.assertEqual(report["pre_visible_semantic_junk_high_confidence_candidate_count"], 0, report)
+        self.assertTrue(
+            any(
+                row["type"] == "lookahead_nominal_restart_fragment"
+                and row["proposed_action"] == "keep"
+                and row["visible_text"] == "手里唯一能上桌的筹码"
+                for row in report["pre_visible_semantic_junk_candidates"]
+            ),
+            report,
+        )
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda _repaired: captions,
+        )
+
+        visible = "".join(caption.text for caption in result.captions)
+        self.assertIn("他这具肉体就是他手里唯一能上桌的筹码", visible)
+        self.assertIn("唯一的筹码去加杠杆", visible)
 
     def test_repairs_standalone_topic_prefix_restart_before_longer_caption(self) -> None:
         rows = [

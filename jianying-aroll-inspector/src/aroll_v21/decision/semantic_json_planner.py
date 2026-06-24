@@ -228,3 +228,5 @@ class SemanticDecisionsJsonPlanner:
 
     def _is_high_risk_semantic_issue(self, cluster: RepeatCluster) -> bool:
         return severity_for_cluster(cluster) in HIGH_RISK_SEVERITIES
+
+

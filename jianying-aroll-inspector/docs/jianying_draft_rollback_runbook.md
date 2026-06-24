@@ -6,18 +6,18 @@ Primary script:
 
 ```powershell
 scripts/rollback_jianying_draft.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -ExpectedSourceMediaRoot "<path-to-original-media-root>"
+  -DraftDir "D:\JianyingPro Drafts\6月18日" `
+  -ExpectedSourceMediaRoot "D:\wink\after\S16-嘉豪\Output"
 ```
 
-Without `-Apply`, the script is analyze-only. It decrypts backup candidates, selects the most likely clean baseline, verifies the selected baseline against `-ExpectedSourceMediaRoot` when provided, and writes a report under the configured runtime `draft_rollback_runs` directory.
+Without `-Apply`, the script is analyze-only. It decrypts backup candidates, selects the most likely clean baseline, verifies the selected baseline against `-ExpectedSourceMediaRoot` when provided, and writes a report under `D:\auto_clip_runtime\draft_rollback_runs`.
 
 To apply the rollback:
 
 ```powershell
 scripts/rollback_jianying_draft.ps1 `
-  -DraftDir "<path-to-jianying-draft>" `
-  -ExpectedSourceMediaRoot "<path-to-original-media-root>" `
+  -DraftDir "D:\JianyingPro Drafts\6月18日" `
+  -ExpectedSourceMediaRoot "D:\wink\after\S16-嘉豪\Output" `
   -Apply `
   -StopJianying
 ```
@@ -36,7 +36,7 @@ Selection strategy:
 
 1. Decrypt every `.bak` under `.backup`, including timeline-specific backup folders.
 2. Classify candidates as clean-like or dirty-like.
-3. If the draft already has a registered rollback baseline under the runtime `draft_rollback_runs\_rollback_baselines` directory, use that exact baseline.
+3. If the draft already has a registered rollback baseline under `D:\auto_clip_runtime\draft_rollback_runs\_rollback_baselines`, use that exact baseline.
 4. Otherwise, if automation-dirty backups exist, select the latest clean-like backup before the first dirty-like backup. This preserves the user-prepared baseline: imported original video, 1.2x speed, beauty/effects, and Jianying's own saved state before V21 writes.
 5. If no dirty-like backup exists, select the latest clean-like backup in the initial clean backup cluster. This avoids treating later manual edits, extra tracks, or other non-V21 changes as the original baseline when there is no automation marker.
 6. Quarantine every backup entry later than the selected original baseline, not only automation-marked dirty entries.
@@ -46,7 +46,7 @@ Selection strategy:
 The old strategy is still available for diagnostics:
 
 ```powershell
-scripts/rollback_jianying_draft.ps1 -DraftDir "<path-to-jianying-draft>" -SelectionMode latest-clean-before-dirty
+scripts/rollback_jianying_draft.ps1 -DraftDir "D:\JianyingPro Drafts\6月18日" -SelectionMode latest-clean-before-dirty
 ```
 
 ## Apply Behavior
