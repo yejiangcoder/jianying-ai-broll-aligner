@@ -13,6 +13,42 @@ SELF_REPAIR_AMBIGUOUS_SIMILARITY = 0.52
 _SENTENCE_FINAL_PARTICLES = set("\u4e86\u5427\u5417\u5462\u554a\u5440\u54e6\u54c8\u5457\u5566\u561b")
 _FRAGMENT_TAIL_PARTICLES = set("\u7684\u5f97\u5730\u4e4b\u5728\u4ece\u5bf9\u628a\u88ab\u5c06\u8ba9\u4f7f\u8ddf\u548c\u4e0e\u6216\u53ca\u4ee5\u4e3a\u4e8e\u5230")
 _OPEN_FILLER_SUFFIXES = ("那个", "这个", "就是", "然后", "那么", "所以")
+_ENUMERATION_BAD_SUFFIX_STARTS = (
+    "的",
+    "地",
+    "得",
+    "了",
+    "着",
+    "过",
+    "是",
+    "在",
+    "从",
+    "对",
+    "把",
+    "被",
+    "让",
+    "使",
+    "需要",
+    "可以",
+    "应该",
+    "就是",
+    "然后",
+    "那么",
+    "所以",
+    "但是",
+)
+_ENUMERATION_BAD_SUFFIX_ENDS = (
+    "的",
+    "地",
+    "得",
+    "在",
+    "从",
+    "对",
+    "把",
+    "被",
+    "让",
+    "使",
+)
 
 
 def recommended_drop_indices(row: dict[str, Any], cluster: dict[str, Any] | None = None) -> list[int]:
@@ -58,6 +94,8 @@ def self_repair_aborted_phrase_candidate(left_text: str, right_text: str) -> dic
     prefix_len = _common_prefix_len(left, right)
     if prefix_len < SELF_REPAIR_MIN_COMMON_PREFIX_CHARS:
         return no_candidate
+    if parallel_enumeration_candidate(left_text, right_text) is not None:
+        return no_candidate
     left_suffix = left[prefix_len:]
     right_suffix = right[prefix_len:]
     if not left_suffix or not right_suffix:
@@ -96,6 +134,69 @@ def self_repair_aborted_phrase_candidate(left_text: str, right_text: str) -> dic
         "requires_semantic_adjudication": not deterministic,
         "suggested_decision": "drop_left_keep_right" if deterministic else "semantic_adjudication_required",
     }
+
+
+def parallel_enumeration_candidate(left_text: str, right_text: str) -> dict[str, Any] | None:
+    """Detect adjacent parallel list items that reuse a predicate but keep different objects."""
+
+    no_candidate: dict[str, Any] | None = None
+    left = normalize_text(left_text)
+    right = normalize_text(right_text)
+    if not left or not right or left == right:
+        return no_candidate
+    if left in right or right in left:
+        return no_candidate
+    prefix_len = _common_prefix_len(left, right)
+    if _cjk_char_count(left[:prefix_len]) < SELF_REPAIR_MIN_COMMON_PREFIX_CHARS:
+        return no_candidate
+    if not left[:prefix_len].endswith("的"):
+        return no_candidate
+    left_suffix = left[prefix_len:]
+    right_suffix = right[prefix_len:]
+    if not _looks_like_parallel_item_suffix(left_suffix) or not _looks_like_parallel_item_suffix(right_suffix):
+        return no_candidate
+    left_chars = _cjk_chars(left_suffix)
+    right_chars = _cjk_chars(right_suffix)
+    if not left_chars or not right_chars:
+        return no_candidate
+    overlap = set(left_chars) & set(right_chars)
+    overlap_ratio = len(overlap) / max(1, min(len(set(left_chars)), len(set(right_chars))))
+    if overlap_ratio >= 0.5:
+        return no_candidate
+    return {
+        "reason": "parallel_enumeration",
+        "left_text": left_text,
+        "right_text": right_text,
+        "left_normalized_text": left,
+        "right_normalized_text": right,
+        "common_prefix": left[:prefix_len],
+        "common_prefix_chars": prefix_len,
+        "left_item_text": left_suffix,
+        "right_item_text": right_suffix,
+    }
+
+
+def _looks_like_parallel_item_suffix(text: str) -> bool:
+    if not text:
+        return False
+    cjk_count = _cjk_char_count(text)
+    if cjk_count < 2 or cjk_count > 10:
+        return False
+    if any(text.startswith(prefix) for prefix in _ENUMERATION_BAD_SUFFIX_STARTS):
+        return False
+    if any(text.endswith(suffix) for suffix in _ENUMERATION_BAD_SUFFIX_ENDS):
+        return False
+    if text in _OPEN_FILLER_SUFFIXES:
+        return False
+    return True
+
+
+def _cjk_chars(text: str) -> list[str]:
+    return [char for char in text if "\u4e00" <= char <= "\u9fff"]
+
+
+def _cjk_char_count(text: str) -> int:
+    return len(_cjk_chars(text))
 
 
 def _common_prefix_len(left: str, right: str) -> int:

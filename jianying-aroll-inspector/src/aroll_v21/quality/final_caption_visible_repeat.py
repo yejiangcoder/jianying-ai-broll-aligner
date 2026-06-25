@@ -56,6 +56,8 @@ INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS = 14
 INTERNAL_PREFIX_RESTART_LEAD_PREFIXES = ("", "就", "呃", "啊", "嗯")
 INTERNAL_PREFIX_RESTART_MAX_LEAD_CHARS = 2
 INTERNAL_PREFIX_RESTART_MAX_FUZZY_GAP_CHARS = 2
+INTERNAL_PREFIX_RESTART_PRONOUN_LEADS = ("我", "你", "他", "她", "它", "咱", "我们", "你们", "他们", "她们")
+INTERNAL_PREFIX_RESTART_LEAD_FOLLOWERS = ("会", "要", "能", "敢", "在", "把", "给", "被", "让", "是", "就", "还", "都")
 ABANDONED_CLAUSE_RESTART_MIN_PHRASE_CHARS = 2
 ABANDONED_CLAUSE_RESTART_MAX_PHRASE_CHARS = 10
 ABANDONED_CLAUSE_RESTART_MAX_GAP_CHARS = 12
@@ -64,6 +66,37 @@ ABANDONED_CLAUSE_RESTART_PARTICLES = ("呢", "啊", "哦", "喔", "呃", "嗯", 
 REPEATED_DISCOURSE_OPENERS = ("但凡", "如果", "假如", "要是", "所以", "因为", "但是", "然后", "其实", "就是")
 REPEATED_DISCOURSE_MIN_REMAINDER_CHARS = 3
 REPEATED_DISCOURSE_MAX_SOURCE_GAP_US = 500_000
+CONDITIONAL_DISCOURSE_OPENERS = ("但凡", "如果", "假如", "要是")
+CONDITIONAL_QUANTIFIED_SUBJECT_STARTS = (
+    "任何",
+    "任意",
+    "每个",
+    "每一个",
+    "所有",
+    "一个",
+    "一名",
+    "这种",
+    "这个",
+    "那个",
+    "这些",
+    "那些",
+    "凡是",
+)
+SHORT_ASCII_HEAD_CONTINUATION_PREFIXES = (
+    "只是",
+    "才是",
+    "不是",
+    "是",
+    "也",
+    "会",
+    "能",
+    "要",
+    "追求",
+    "阶段",
+    "标准",
+    "级",
+    "的",
+)
 SUSPECT_REPEATED_NUMERALS = set("一二三四五六七八九十两")
 SUSPECT_NUMERAL_CLASSIFIER_STARTS = set("个件节门块万千百元分毛次种类套张份杯瓶支台辆只条")
 FINAL_VISIBLE_RECHECK_DECISIONS = [
@@ -206,6 +239,9 @@ def _containment_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str,
             if is_explanatory_term_reuse(left_text, right_text) or is_explanatory_term_reuse(right_text, left_text):
                 continue
             if left_text == right_text or (len(left_text) >= 2 and left_text in right_text) or (len(right_text) >= 2 and right_text in left_text):
+                short_index = left_index if len(left_text) <= len(right_text) else right_index
+                if _short_ascii_caption_heads_immediate_continuation(captions, short_index):
+                    continue
                 candidates.append(
                     _candidate(
                         "containment_repeat",
@@ -216,6 +252,23 @@ def _containment_candidates(captions: list[CaptionRenderUnit]) -> list[dict[str,
                     )
                 )
     return candidates
+
+
+def _short_ascii_caption_heads_immediate_continuation(captions: list[CaptionRenderUnit], index: int) -> bool:
+    if index < 0 or index + 1 >= len(captions):
+        return False
+    caption = captions[index]
+    text = normalize_text(caption.text)
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]{0,7}", text or ""):
+        return False
+    next_caption = captions[index + 1]
+    gap_us = int(next_caption.target_start_us) - int(caption.target_end_us)
+    if gap_us < -80_000 or gap_us > 300_000:
+        return False
+    next_text = normalize_text(next_caption.text)
+    if not next_text:
+        return False
+    return next_text.startswith(SHORT_ASCII_HEAD_CONTINUATION_PREFIXES)
 
 
 def _prefix_suffix_candidates(captions: list[CaptionRenderUnit], excluded_pairs: set[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -667,6 +720,8 @@ def _repeated_discourse_opener_candidates(captions: list[CaptionRenderUnit]) -> 
         opener = _shared_discourse_opener(left_text, right_text)
         if not opener:
             continue
+        if _is_parallel_condition_discourse_opener(left_text, right_text, opener):
+            continue
         if len(left_text) - len(opener) < REPEATED_DISCOURSE_MIN_REMAINDER_CHARS:
             continue
         if len(right_text) - len(opener) < REPEATED_DISCOURSE_MIN_REMAINDER_CHARS:
@@ -699,6 +754,22 @@ def _shared_discourse_opener(left_text: str, right_text: str) -> str:
         if left_text.startswith(opener) and right_text.startswith(opener):
             return opener
     return ""
+
+
+def _is_parallel_condition_discourse_opener(left_text: str, right_text: str, opener: str) -> bool:
+    if opener not in CONDITIONAL_DISCOURSE_OPENERS:
+        return False
+    left_remainder = normalize_text(left_text[len(opener) :])
+    right_remainder = normalize_text(right_text[len(opener) :])
+    if not left_remainder or not right_remainder:
+        return False
+    left_quantified = any(left_remainder.startswith(prefix) for prefix in CONDITIONAL_QUANTIFIED_SUBJECT_STARTS)
+    right_quantified = any(right_remainder.startswith(prefix) for prefix in CONDITIONAL_QUANTIFIED_SUBJECT_STARTS)
+    if not (left_quantified or right_quantified):
+        return False
+    if left_remainder.startswith(right_remainder) or right_remainder.startswith(left_remainder):
+        return False
+    return True
 
 
 def _caption_source_gap_within(left: CaptionRenderUnit, right: CaptionRenderUnit, max_gap_us: int) -> bool:
@@ -1137,7 +1208,8 @@ def _internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
             gap = text[first_start + phrase_len : second_start]
             if len(gap) > INTERNAL_PREFIX_RESTART_MAX_GAP_CHARS:
                 continue
-            drop_text = text[:second_start]
+            restart_start = _internal_prefix_restart_start_before_second(text, first_start, phrase_len, second_start)
+            drop_text = text[:restart_start]
             if not drop_text or len(drop_text) > INTERNAL_PREFIX_RESTART_MAX_DROP_CHARS:
                 continue
             if best is None or phrase_len > int(best.get("phrase_chars") or 0):
@@ -1147,6 +1219,7 @@ def _internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
                     "overlap_text": text[first_start : second_start + phrase_len],
                     "drop_text": drop_text,
                     "first_start": first_start,
+                    "restart_start": restart_start,
                     "second_start": second_start,
                     "gap_text": gap,
                     "phrase_chars": phrase_len,
@@ -1163,6 +1236,34 @@ def _internal_prefix_restart_repeat(text: str) -> dict[str, Any] | None:
     ):
         return abandoned
     return best
+
+
+def _internal_prefix_restart_start_before_second(
+    text: str,
+    first_start: int,
+    phrase_len: int,
+    second_start: int,
+) -> int:
+    gap = text[first_start + phrase_len : second_start]
+    if not gap:
+        return second_start
+    lead = _restart_lead_suffix(gap)
+    if not lead:
+        return second_start
+    return second_start - len(lead)
+
+
+def _restart_lead_suffix(gap: str) -> str:
+    for lead in sorted(INTERNAL_PREFIX_RESTART_PRONOUN_LEADS, key=len, reverse=True):
+        start = gap.rfind(lead)
+        if start < 0:
+            continue
+        suffix = gap[start:]
+        if len(suffix) <= len(lead):
+            continue
+        if suffix[len(lead) :].startswith(INTERNAL_PREFIX_RESTART_LEAD_FOLLOWERS):
+            return suffix
+    return ""
 
 
 def _abandoned_clause_restart_repeat(text: str) -> dict[str, Any] | None:

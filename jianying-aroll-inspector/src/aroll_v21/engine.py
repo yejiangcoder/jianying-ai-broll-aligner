@@ -613,10 +613,30 @@ class ArollEngine:
             return
         final_text = normalize_text("".join(str(segment.text or "") for segment in final_timeline))
         captions_text = normalize_text("".join(str(caption.text or "") for caption in captions))
+        final_target_resolver = FinalTargetRepeatResolver()
+        active_final_target_pairs = {
+            pair
+            for pair in (final_target_resolver._cluster_text_pair(cluster) for cluster in final_target_resolver._clusters(final_timeline))
+            if pair is not None
+        }
         resolved_cluster_ids: set[str] = set()
         remaining_payloads: list[dict[str, Any]] = []
         for payload in decision_plan.semantic_request_payloads:
             cluster_id = str(payload.get("cluster_id") or "")
+            if final_target_resolver._is_final_target_repeat_payload(payload):
+                payload_pair = final_target_resolver._payload_text_pair(payload)
+                if payload_pair is not None and payload_pair not in active_final_target_pairs:
+                    resolved_cluster_ids.add(cluster_id)
+                    decision_plan.decision_trace.append(
+                        {
+                            "route": "semantic_gate",
+                            "cluster_id": cluster_id,
+                            "decision": "resolved_by_final_target_cluster_absence",
+                            "reason": "final-target request text pair no longer appears as an active final repeat cluster",
+                            "requires_semantic_decision": False,
+                        }
+                    )
+                    continue
             comparable_texts = self._semantic_payload_comparable_texts(payload)
             if comparable_texts and all(text not in final_text and text not in captions_text for text in comparable_texts):
                 resolved_cluster_ids.add(cluster_id)

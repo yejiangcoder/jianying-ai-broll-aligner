@@ -6,8 +6,10 @@ from typing import Any
 
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import is_semantic_label_reuse_boundary
 from aroll_v21.quality.final_visible_repair.proposal import TimelineRepairProposal
 from aroll_v21.quality.final_visible_repair.timeline_utils import ordered_segments, text_from_word_ids
+from aroll_v21.quality.repeat_span_repair import parallel_enumeration_candidate
 
 
 MIN_BOUNDARY_RESTART_OVERLAP_CJK_CHARS = 3
@@ -191,6 +193,8 @@ def _candidate_for_pair(
         if overlap_cjk_count < MIN_BOUNDARY_RESTART_OVERLAP_CJK_CHARS:
             continue
         if not previous_text.endswith(previous_suffix_text) or not next_text.startswith(previous_suffix_text):
+            continue
+        if is_semantic_label_reuse_boundary(previous_text, next_text, previous_suffix_text):
             continue
         next_remaining_text = next_text[len(previous_suffix_text) :]
         if _cjk_char_count(next_remaining_text) < 1:
@@ -384,6 +388,8 @@ def _partial_boundary_restart_candidate(
             next_remainder = next_text[shared_len:]
             if _cjk_char_count(next_remainder) < 1:
                 continue
+            if is_semantic_label_reuse_boundary(previous_text, next_text, suffix):
+                continue
             drop_ids = _trailing_word_ids_for_text(previous_word_ids, suffix, source_graph)
             if not drop_ids or len(drop_ids) >= len(previous_word_ids):
                 continue
@@ -392,6 +398,8 @@ def _partial_boundary_restart_candidate(
             if not _leading_word_prefix_matches(drop_ids, shared, source_graph):
                 continue
             if _suffix_trim_would_leave_open_clause(previous_text, suffix):
+                continue
+            if parallel_enumeration_candidate(suffix, next_text) is not None:
                 continue
             return BoundaryRestartCandidate(
                 prev_segment_id=previous.segment_id,
@@ -465,6 +473,8 @@ def _source_tail_restart_candidate(
             if not _leading_word_prefix_matches(drop_ids, shared, source_graph):
                 continue
             if _suffix_trim_would_leave_open_clause(segment_text, suffix):
+                continue
+            if parallel_enumeration_candidate(suffix, next_text) is not None:
                 continue
             return BoundaryRestartCandidate(
                 prev_segment_id=segment.segment_id,

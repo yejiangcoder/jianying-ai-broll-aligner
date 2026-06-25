@@ -18,6 +18,7 @@ _MAX_PROTECTED_MODIFIER_REDUPLICATION_CHARS = 4
 _REDUPLICATION_AMOUNT_UNITS = set("\u4e2a\u53ea\u4ef6\u53f0\u90e8\u676f\u74f6\u4efd\u6b21\u5757\u5143\u6bdb\u89d2\u5206\u94b1\u4e07\u5343\u767e\u5341\u4ebf\u5e74\u6708\u5929\u5c0f\u65f6\u5206\u949f\u516c\u91cc\u7c73\u65a4\u514b\u5c81\u5e73")
 _LABEL_INTRODUCERS = ("叫做", "称为", "称作", "叫", "算作", "属于", "是")
 _DEFINITIONAL_CONNECTORS = ("等于", "就是", "指的是", "意味着", "是", "叫做", "叫")
+_ATTRIBUTIVE_LABEL_CONTEXT_MARKERS = ("般的", "式的", "型的", "感的", "的")
 
 
 def _row_text(row: dict[str, Any]) -> str:
@@ -137,9 +138,17 @@ def is_semantic_label_reuse_boundary(left_text: str, right_text: str, overlap_te
         return False
     left_prefix = left[: -len(overlap)]
     right_suffix = right[len(overlap) :]
-    if not any(left_prefix.endswith(marker) for marker in _LABEL_INTRODUCERS):
+    if not any(right_suffix.startswith(marker) for marker in _DEFINITIONAL_CONNECTORS):
         return False
-    return any(right_suffix.startswith(marker) for marker in _DEFINITIONAL_CONNECTORS)
+    if any(left_prefix.endswith(marker) for marker in _LABEL_INTRODUCERS):
+        return True
+    return _has_attributive_label_context(left_prefix)
+
+
+def _has_attributive_label_context(left_prefix: str) -> bool:
+    if len(left_prefix) < 3:
+        return False
+    return any(left_prefix.endswith(marker) for marker in _ATTRIBUTIVE_LABEL_CONTEXT_MARKERS)
 
 
 def _candidate(

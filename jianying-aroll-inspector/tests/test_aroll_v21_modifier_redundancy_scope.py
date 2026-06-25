@@ -51,6 +51,26 @@ class ArollV21ModifierRedundancyScopeTests(unittest.TestCase):
         self.assertEqual(candidates[0]["right_modifier"], "开心")
         self.assertEqual(candidates[0]["head_text"], "孩子")
 
+    def test_relational_determiner_phrase_does_not_trigger_modifier_redundancy(self) -> None:
+        candidates = detect_adjacent_modifier_semantic_redundancy([{"fragment_id": "f1", "fragment_text": "把你本该有的骨骼的张力直接"}])
+
+        self.assertEqual(candidates, [])
+
+    def test_verb_object_fragment_does_not_trigger_modifier_redundancy(self) -> None:
+        candidates = detect_adjacent_modifier_semantic_redundancy([{"fragment_id": "f1", "fragment_text": "能完美咬合你的真实的肩宽"}])
+
+        self.assertEqual(candidates, [])
+
+    def test_existential_property_phrase_does_not_trigger_modifier_redundancy(self) -> None:
+        candidates = detect_adjacent_modifier_semantic_redundancy([{"fragment_id": "f1", "fragment_text": "必须服务你本来就有的自律的身材"}])
+
+        self.assertEqual(candidates, [])
+
+    def test_action_intent_phrase_does_not_trigger_modifier_redundancy(self) -> None:
+        candidates = detect_adjacent_modifier_semantic_redundancy([{"fragment_id": "f1", "fragment_text": "你要做的唯一的动作就是"}])
+
+        self.assertEqual(candidates, [])
+
     def test_noun_phrase_plus_emphasis_adverb_plus_predicate_does_not_trigger(self) -> None:
         candidates = detect_adjacent_modifier_semantic_redundancy([{"fragment_id": "f1", "fragment_text": "勇敢的人真的能成功"}])
 
@@ -65,6 +85,18 @@ class ArollV21ModifierRedundancyScopeTests(unittest.TestCase):
 
     def test_round_fixture_noun_scope_emphasis_does_not_enter_semantic_payload(self) -> None:
         plan = _semantic_plan_for_text("自信的人真的能拿到结果")
+
+        self.assertEqual(plan.semantic_request_payloads, [])
+        self.assertEqual(plan.split_decisions, [])
+
+    def test_round_fixture_existential_property_does_not_generate_split(self) -> None:
+        plan = _semantic_plan_for_text("本来就有的自律的身材")
+
+        self.assertEqual(plan.semantic_request_payloads, [])
+        self.assertEqual(plan.split_decisions, [])
+
+    def test_round_fixture_action_intent_does_not_generate_split(self) -> None:
+        plan = _semantic_plan_for_text("你要做的唯一的动作就是")
 
         self.assertEqual(plan.semantic_request_payloads, [])
         self.assertEqual(plan.split_decisions, [])

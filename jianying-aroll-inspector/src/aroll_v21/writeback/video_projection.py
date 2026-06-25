@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+GAPLESS_PROJECTION_EDGE_HANDLE_US = 80_000
+
 
 def configure_writeback_dependencies(dependencies: dict[str, Any]) -> None:
     globals().update(dependencies)
@@ -70,18 +72,41 @@ def _gapless_caption_video_projection_plan(self, run_report: RunReport) -> dict[
             group_duration = max(0, group_source_end - group_source_start)
             if group_duration <= 0:
                 continue
-            group_target_start = target_cursor
+            lead_handle_us, tail_handle_us, clip_source_start, clip_source_end = self._gapless_projection_group_handles(
+                final_segment,
+                group,
+            )
+            video_target_start = int(target_cursor)
+            group_target_start = video_target_start + lead_handle_us
             group_target_end = group_target_start + group_duration
-            target_cursor = group_target_end
+            video_target_end = group_target_end + tail_handle_us
+            target_cursor = video_target_end
             projected_groups.append(
                 {
                     **group,
                     "projected_target_start_us": group_target_start,
                     "projected_target_end_us": group_target_end,
+                    "video_target_start_us": video_target_start,
+                    "video_target_end_us": video_target_end,
+                    "clip_source_start_us": clip_source_start,
+                    "clip_source_end_us": clip_source_end,
+                    "lead_handle_us": lead_handle_us,
+                    "tail_handle_us": tail_handle_us,
                 }
             )
             debug_hints = dict(final_segment.debug_hints)
-            debug_hints["safe_handle_policy_enabled"] = False
+            debug_hints.update(
+                {
+                    "safe_handle_policy_enabled": bool(lead_handle_us or tail_handle_us),
+                    "safe_handle_source_window_start_us": int(group.get("handle_source_window_start_us", clip_source_start)),
+                    "safe_handle_source_window_end_us": int(group.get("handle_source_window_end_us", clip_source_end)),
+                    "safe_handle_requested_lead_us": lead_handle_us,
+                    "safe_handle_requested_tail_us": tail_handle_us,
+                    "safe_handle_previous_target_end_us": video_target_start,
+                    "safe_handle_next_target_start_us": video_target_end,
+                    "gapless_projection_edge_handle_cap_us": GAPLESS_PROJECTION_EDGE_HANDLE_US,
+                }
+            )
             if bool(group.get("source_projection_required")):
                 debug_hints.update(
                     {
@@ -105,17 +130,20 @@ def _gapless_caption_video_projection_plan(self, run_report: RunReport) -> dict[
                     decision_ids=list(final_segment.decision_ids),
                     spoken_source_start_us=group_source_start,
                     spoken_source_end_us=group_source_end,
-                    clip_source_start_us=group_source_start,
-                    clip_source_end_us=group_source_end,
-                    lead_handle_us=0,
-                    tail_handle_us=0,
+                    clip_source_start_us=clip_source_start,
+                    clip_source_end_us=clip_source_end,
+                    lead_handle_us=lead_handle_us,
+                    tail_handle_us=tail_handle_us,
                     debug_hints=debug_hints,
                 )
             )
+        if projected_groups:
+            segment_target_delta = int(projected_groups[0]["projected_target_start_us"]) - int(projected_groups[0]["original_target_start_us"])
         self._apply_caption_ranges_for_projected_segment(
             caption_target_ranges,
             segment_captions,
             projected_groups,
+            words=words,
             default_delta_us=segment_target_delta,
         )
     return {
@@ -187,6 +215,8 @@ def _final_segment_video_projection_groups(
     source_end = int(final_segment.source_end_us)
     target_start = int(final_segment.target_start_us)
     target_end = int(final_segment.target_end_us)
+    clip_source_start = int(final_segment.clip_source_start_us) if final_segment.clip_source_start_us is not None else source_start
+    clip_source_end = int(final_segment.clip_source_end_us) if final_segment.clip_source_end_us is not None else source_end
     if source_end <= source_start or target_end <= target_start:
         return []
     if not segment_captions and final_segment.word_ids:
@@ -194,6 +224,15 @@ def _final_segment_video_projection_groups(
     captioned_word_ids = {str(word_id) for caption in segment_captions for word_id in caption.word_ids}
     spoken_start = int(final_segment.spoken_source_start_us) if final_segment.spoken_source_start_us is not None else source_start
     spoken_end = int(final_segment.spoken_source_end_us) if final_segment.spoken_source_end_us is not None else source_end
+    protected_word_ids = {str(word_id) for word_id in final_segment.word_ids}
+    handle_window_start, handle_window_end = _handle_window_excluding_external_words(
+        words,
+        protected_word_ids=protected_word_ids,
+        clip_source_start=clip_source_start,
+        clip_source_end=clip_source_end,
+        spoken_start=spoken_start,
+        spoken_end=spoken_end,
+    )
     uncaptioned_speech_words = [
         word
         for word in words
@@ -211,6 +250,8 @@ def _final_segment_video_projection_groups(
                 "word_ids": list(final_segment.word_ids),
                 "caption_ids": [str(caption.caption_id) for caption in segment_captions],
                 "source_projection_required": False,
+                "handle_source_window_start_us": handle_window_start,
+                "handle_source_window_end_us": handle_window_end,
             }
         ]
     kept_words = [
@@ -229,6 +270,8 @@ def _final_segment_video_projection_groups(
                 "word_ids": list(final_segment.word_ids),
                 "caption_ids": [str(caption.caption_id) for caption in segment_captions],
                 "source_projection_required": False,
+                "handle_source_window_start_us": handle_window_start,
+                "handle_source_window_end_us": handle_window_end,
             }
         ]
     groups: list[list[Any]] = [[kept_words[0]]]
@@ -247,18 +290,75 @@ def _final_segment_video_projection_groups(
     for group in groups:
         caption_ids = self._caption_ids_for_word_group(group, segment_captions)
         group_captions = [caption for caption in segment_captions if str(caption.caption_id) in set(caption_ids)]
+        group_source_start = min(int(word.source_start_us) for word in group)
+        group_source_end = max(int(word.source_end_us) for word in group)
+        previous_blocker_ends = [
+            int(word.source_end_us)
+            for word in uncaptioned_speech_words
+            if int(word.source_end_us) <= group_source_start
+        ]
+        next_blocker_starts = [
+            int(word.source_start_us)
+            for word in uncaptioned_speech_words
+            if int(word.source_start_us) >= group_source_end
+        ]
         projection_groups.append(
             {
-                "source_start_us": min(int(word.source_start_us) for word in group),
-                "source_end_us": max(int(word.source_end_us) for word in group),
+                "source_start_us": group_source_start,
+                "source_end_us": group_source_end,
                 "original_target_start_us": min((int(caption.target_start_us) for caption in group_captions), default=target_start),
                 "original_target_end_us": max((int(caption.target_end_us) for caption in group_captions), default=target_end),
                 "word_ids": [str(word.word_id) for word in group],
                 "caption_ids": caption_ids,
                 "source_projection_required": True,
+                "handle_source_window_start_us": max(clip_source_start, max(previous_blocker_ends, default=clip_source_start)),
+                "handle_source_window_end_us": min(clip_source_end, min(next_blocker_starts, default=clip_source_end)),
             }
         )
     return projection_groups
+
+
+def _gapless_projection_group_handles(
+    self,
+    final_segment: FinalTimelineSegment,
+    group: dict[str, Any],
+) -> tuple[int, int, int, int]:
+    spoken_start = int(group["source_start_us"])
+    spoken_end = int(group["source_end_us"])
+    if bool(group.get("source_projection_required")):
+        return 0, 0, spoken_start, spoken_end
+    clip_lower = int(group.get("handle_source_window_start_us", spoken_start))
+    clip_upper = int(group.get("handle_source_window_end_us", spoken_end))
+    clip_lower = min(spoken_start, max(clip_lower, int(final_segment.clip_source_start_us) if final_segment.clip_source_start_us is not None else int(final_segment.source_start_us)))
+    clip_upper = max(spoken_end, min(clip_upper, int(final_segment.clip_source_end_us) if final_segment.clip_source_end_us is not None else int(final_segment.source_end_us)))
+    lead = min(GAPLESS_PROJECTION_EDGE_HANDLE_US, max(0, spoken_start - clip_lower))
+    tail = min(GAPLESS_PROJECTION_EDGE_HANDLE_US, max(0, clip_upper - spoken_end))
+    return lead, tail, spoken_start - lead, spoken_end + tail
+
+
+def _handle_window_excluding_external_words(
+    words: list[Any],
+    *,
+    protected_word_ids: set[str],
+    clip_source_start: int,
+    clip_source_end: int,
+    spoken_start: int,
+    spoken_end: int,
+) -> tuple[int, int]:
+    window_start = int(clip_source_start)
+    window_end = int(clip_source_end)
+    for word in words:
+        if str(getattr(word, "word_id", "") or "") in protected_word_ids:
+            continue
+        word_start = int(getattr(word, "source_start_us", 0) or 0)
+        word_end = int(getattr(word, "source_end_us", word_start) or word_start)
+        if word_end <= word_start:
+            continue
+        if word_start < int(spoken_start) and word_end > int(window_start):
+            window_start = max(window_start, min(int(spoken_start), word_end))
+        if word_end > int(spoken_end) and word_start < int(window_end):
+            window_end = min(window_end, max(int(spoken_end), word_start))
+    return min(window_start, int(spoken_start)), max(window_end, int(spoken_end))
 
 
 def _caption_ids_for_word_group(self, words: list[Any], captions: list[CaptionRenderUnit]) -> list[str]:
@@ -276,9 +376,11 @@ def _apply_caption_ranges_for_projected_segment(
     captions: list[CaptionRenderUnit],
     projected_groups: list[dict[str, Any]],
     *,
+    words: list[Any],
     default_delta_us: int,
 ) -> None:
     source_projected = any(bool(group.get("source_projection_required")) for group in projected_groups)
+    word_by_id = {str(word.word_id): word for word in words}
     groups_by_caption: dict[str, list[dict[str, Any]]] = {}
     for group in projected_groups:
         for caption_id in group.get("caption_ids") or []:
@@ -286,14 +388,27 @@ def _apply_caption_ranges_for_projected_segment(
     for caption in captions:
         caption_id = str(caption.caption_id)
         caption_groups = groups_by_caption.get(caption_id) or []
-        if source_projected and len(caption_groups) > 1:
-            start = min(int(group["projected_target_start_us"]) for group in caption_groups)
-            end = max(int(group["projected_target_end_us"]) for group in caption_groups)
-        elif source_projected and len(caption_groups) == 1:
-            group = caption_groups[0]
-            group_delta = int(group["projected_target_start_us"]) - int(group["original_target_start_us"])
-            start = int(caption.target_start_us) + group_delta
-            end = int(caption.target_end_us) + group_delta
+        if source_projected and caption_groups:
+            projected_word_ranges = [
+                projected_range
+                for group in caption_groups
+                if (projected_range := self._project_caption_word_span_to_group(caption, group, word_by_id)) is not None
+            ]
+            if projected_word_ranges:
+                start = min(row[0] for row in projected_word_ranges)
+                end = max(row[1] for row in projected_word_ranges)
+            else:
+                shifted_ranges: list[tuple[int, int]] = []
+                for group in caption_groups:
+                    group_delta = int(group["projected_target_start_us"]) - int(group["original_target_start_us"])
+                    shifted_ranges.append(
+                        (
+                            int(caption.target_start_us) + group_delta,
+                            int(caption.target_end_us) + group_delta,
+                        )
+                    )
+                start = min(row[0] for row in shifted_ranges)
+                end = max(row[1] for row in shifted_ranges)
         else:
             start = int(caption.target_start_us) + int(default_delta_us)
             end = int(caption.target_end_us) + int(default_delta_us)
@@ -304,6 +419,37 @@ def _apply_caption_ranges_for_projected_segment(
                 {"caption_id": caption.caption_id, "target_start_us": start, "target_end_us": end},
             )
         self._merge_caption_target_range(caption_target_ranges, caption_id, start, end)
+
+
+def _project_caption_word_span_to_group(
+    self,
+    caption: CaptionRenderUnit,
+    group: dict[str, Any],
+    word_by_id: dict[str, Any],
+) -> tuple[int, int] | None:
+    group_word_ids = {str(word_id) for word_id in group.get("word_ids") or []}
+    caption_words = [
+        word_by_id[word_id]
+        for word_id in (str(word_id) for word_id in caption.word_ids)
+        if word_id in group_word_ids and word_id in word_by_id
+    ]
+    if not caption_words:
+        return None
+    group_source_start = int(group["source_start_us"])
+    group_source_end = int(group["source_end_us"])
+    group_target_start = int(group["projected_target_start_us"])
+    group_target_end = int(group["projected_target_end_us"])
+    source_start = max(group_source_start, min(int(word.source_start_us) for word in caption_words))
+    source_end = min(group_source_end, max(int(word.source_end_us) for word in caption_words))
+    if source_end <= source_start:
+        return None
+    target_start = group_target_start + (source_start - group_source_start)
+    target_end = group_target_start + (source_end - group_source_start)
+    target_start = max(group_target_start, min(group_target_end, target_start))
+    target_end = max(group_target_start, min(group_target_end, target_end))
+    if target_end <= target_start:
+        return None
+    return target_start, target_end
 
 
 def _merge_caption_target_range(
@@ -391,11 +537,14 @@ def _caption_video_source_groups(
 def _video_segment_from_template(self, template: dict[str, Any], final_segment, index: int, draft_data: dict[str, Any]) -> dict[str, Any]:
     speed = self._segment_speed(template, draft_data)
     row = project_video_segment_from_template(template, final_segment, index, speed)
+    projection = row.get("_safe_handle_projection") if isinstance(row.get("_safe_handle_projection"), dict) else {}
+    projected_source_start = int(projection.get("source_start_us") if projection else final_segment.source_start_us)
+    projected_source_end = int(projection.get("source_end_us") if projection else final_segment.source_end_us)
     row["_v21_audio_coverage"] = {
         "timeline_segment_id": str(final_segment.segment_id),
         "caption_id": str((final_segment.debug_hints or {}).get("writeback_caption_id") or ""),
-        "source_start_us": int(final_segment.source_start_us),
-        "source_end_us": int(final_segment.source_end_us),
+        "source_start_us": projected_source_start,
+        "source_end_us": projected_source_end,
         "spoken_source_start_us": int(
             final_segment.spoken_source_start_us if final_segment.spoken_source_start_us is not None else final_segment.source_start_us
         ),

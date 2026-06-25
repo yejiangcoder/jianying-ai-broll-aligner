@@ -9,6 +9,9 @@ def configure_rule_dependencies(dependencies: dict[str, Any]) -> None:
 
 MAX_CAPTION_ONLY_TARGET_GAP_US = 120_000
 
+MAX_SAME_SUBTITLE_SHORT_TAIL_CHARS = 2
+MAX_SAME_SUBTITLE_SHORT_TAIL_SOURCE_GAP_US = 800_000
+
 
 SUBJECT_PREFIX_COMPLETED_PREDICATE_REPAIR_REASON = "subject_prefix_completed_predicate_restart"
 SUBJECT_PREFIX_COMPLETED_PREDICATE_STARTS = ("全是", "都是", "全都是", "全部是", "尽是", "就是")
@@ -118,6 +121,108 @@ def _finalize_subject_prefix_completed_predicate_caption_merges(
         current = repaired
         actions.append(action)
         pass_index += 1
+
+
+def _finalize_same_subtitle_short_tail_caption_merges(
+    captions: list[CaptionRenderUnit],
+    *,
+    source_graph: CanonicalSourceGraph,
+    pass_index_start: int,
+) -> tuple[list[CaptionRenderUnit], list[dict[str, Any]]]:
+    current = _renumber_captions(list(captions))
+    actions: list[dict[str, Any]] = []
+    pass_index = max(1, pass_index_start)
+    while True:
+        ordered = _ordered_captions(current)
+        step: tuple[list[CaptionRenderUnit], dict[str, Any]] | None = None
+        for index in range(len(ordered) - 1):
+            left = ordered[index]
+            right = ordered[index + 1]
+            if not _same_subtitle_short_tail_should_merge(left, right, source_graph):
+                continue
+            merged_result = _merge_adjacent_captions(left, right)
+            if merged_result is None:
+                continue
+            merged_caption, merge_decision = merged_result
+            if not bool(build_final_caption_visible_repeat_gate([merged_caption]).get("gate_passed")):
+                continue
+            repaired = [*ordered[:index], merged_caption, *ordered[index + 2 :]]
+            step = (
+                _renumber_captions(repaired),
+                _action(
+                    "same_subtitle_short_tail_caption",
+                    "caption_only_merge_same_subtitle_short_tail",
+                    pass_index,
+                    {
+                        "caption_id": right.caption_id,
+                        "related_caption_id": left.caption_id,
+                        "reason": "short tail caption belongs to the same source subtitle as the previous caption",
+                        "overlap_text": normalize_text(str(right.text or "")),
+                    },
+                    affected_caption_ids=[left.caption_id, right.caption_id],
+                    target_gap_us=int(right.target_start_us) - int(left.target_end_us),
+                    video_segment_merged=False,
+                    caption_only_merge_materialized=True,
+                    caption_only_merge_decision=merge_decision,
+                    merged_into_caption_id=left.caption_id,
+                    consumed_caption_id=right.caption_id,
+                    consumed_caption_state="consumed_by_same_subtitle_short_tail_merge",
+                    merged_caption_text=merged_caption.text,
+                    merged_caption_timeline_segment_ids=list(merged_caption.timeline_segment_ids),
+                    merged_caption_target_start_us=int(merged_caption.target_start_us),
+                    merged_caption_target_end_us=int(merged_caption.target_end_us),
+                ),
+            )
+            break
+        if step is None:
+            return current, actions
+        repaired, action = step
+        if _caption_only_state_signature(repaired) == _caption_only_state_signature(current):
+            return current, actions
+        current = repaired
+        actions.append(action)
+        pass_index += 1
+
+
+def _same_subtitle_short_tail_should_merge(
+    left: CaptionRenderUnit,
+    right: CaptionRenderUnit,
+    source_graph: CanonicalSourceGraph,
+) -> bool:
+    right_text = normalize_text(str(right.text or ""))
+    if not right_text or len(right_text) > MAX_SAME_SUBTITLE_SHORT_TAIL_CHARS:
+        return False
+    target_gap_us = int(right.target_start_us) - int(left.target_end_us)
+    if target_gap_us < 0 or target_gap_us > MAX_CAPTION_ONLY_TARGET_GAP_US:
+        return False
+    source_gap_us = int(right.spoken_source_start_us or 0) - int(left.spoken_source_end_us or 0)
+    if source_gap_us < 0 or source_gap_us > MAX_SAME_SUBTITLE_SHORT_TAIL_SOURCE_GAP_US:
+        return False
+    shared_uids = {
+        uid
+        for uid in set(str(value) for value in list(left.source_subtitle_uids or []))
+        & set(str(value) for value in list(right.source_subtitle_uids or []))
+        if uid
+    }
+    if not shared_uids:
+        return False
+    merged_text = normalize_text(_join_visible_boundary_text(str(left.text or ""), str(right.text or "")))
+    if not merged_text:
+        return False
+    subtitle_texts = _source_subtitle_texts_by_uid(source_graph)
+    if not any(merged_text in normalize_text(subtitle_texts.get(uid, "")) for uid in shared_uids):
+        return False
+    return _caption_only_merge_allowed(left, right)
+
+
+def _source_subtitle_texts_by_uid(source_graph: CanonicalSourceGraph) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for row in list(source_graph.subtitle_rows or []):
+        uid = str(row.get("subtitle_uid") or row.get("id") or "")
+        if not uid:
+            continue
+        result[uid] = str(row.get("text") or row.get("subtitle_text") or row.get("recognize_text") or "")
+    return result
 
 
 def _caption_has_subject_prefix_restart_marker(

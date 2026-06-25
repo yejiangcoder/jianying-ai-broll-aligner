@@ -33,6 +33,8 @@ COMMAND_OR_DIRECTIVE_MARKERS = (
     "滚",
 )
 COMMAND_COMPLETION_TAILS = ("了", "掉", "完", "走", "开", "下去", "起来")
+REACTION_TAIL_MARKERS = ("哼", "呵", "哈", "笑", "笑一声", "冷笑", "骂一句", "说一句")
+EXPRESSIVE_SHORT_TAILS = ("了", "嘛", "啊", "呀", "吧")
 
 
 def _repair_pre_visible_semantic_junk_candidate(
@@ -205,6 +207,8 @@ def _is_isolated_short_source_gap_fragment(
     next_gap_us = next_range[0] - current_range[1]
     if _looks_like_dependent_tail_after_command(previous_text, text, previous_gap_us):
         return False
+    if _looks_like_expressive_tail_after_reaction(previous_text, text, previous_gap_us):
+        return False
     return (
         previous_gap_us >= MIN_ISOLATED_SHORT_FRAGMENT_SOURCE_GAP_US
         and next_gap_us >= MIN_ISOLATED_SHORT_FRAGMENT_SOURCE_GAP_US
@@ -237,3 +241,16 @@ def _looks_like_dependent_tail_after_command(previous_text: str, text: str, prev
     if not any(marker in previous_text for marker in COMMAND_OR_DIRECTIVE_MARKERS):
         return False
     return previous_text.endswith(COMMAND_COMPLETION_TAILS)
+
+
+def _looks_like_expressive_tail_after_reaction(previous_text: str, text: str, previous_gap_us: int) -> bool:
+    if previous_gap_us < 0 or previous_gap_us > MAX_COMMAND_TAIL_SOURCE_GAP_US:
+        return False
+    if not (2 <= len(text) <= MAX_ISOLATED_SHORT_FRAGMENT_CHARS):
+        return False
+    if not text.endswith(EXPRESSIVE_SHORT_TAILS):
+        return False
+    if not previous_text:
+        return False
+    tail_context = previous_text[-8:]
+    return any(marker in tail_context for marker in REACTION_TAIL_MARKERS)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from aroll_v21.quality.repeated_suffix_island import is_coordinated_parallel_suffix_repetition
+
 
 def configure_compiler_dependencies(dependencies: dict[str, Any]) -> None:
     globals().update(dependencies)
@@ -159,12 +161,16 @@ def _repeated_suffix_island_start(self, tokens: list[str]) -> int | None:
             continue
         for start in range(0, suffix_start - n + 1):
             if tokens[start : start + n] == suffix:
+                if is_coordinated_parallel_suffix_repetition(tokens, start, suffix_start, n):
+                    continue
                 return suffix_start
     if len(tokens) >= 3:
         suffix = tokens[-1]
         if suffix and len(suffix) >= 2:
             for start, token in enumerate(tokens[:-1]):
                 if token == suffix and start + 1 < len(tokens) - 1:
+                    if is_coordinated_parallel_suffix_repetition(tokens, start, len(tokens) - 1, 1):
+                        continue
                     return len(tokens) - 1
     no_suffix_island = None
     return no_suffix_island

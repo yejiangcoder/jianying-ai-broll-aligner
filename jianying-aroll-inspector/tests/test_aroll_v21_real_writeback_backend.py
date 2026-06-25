@@ -93,13 +93,16 @@ class ArollV21RealWritebackBackendTests(unittest.TestCase):
             self.assertTrue(writeback_result.report["target_writes"][str(draft_content)])
             self.assertTrue(writeback_result.report["target_writes"][str(template)])
             written = json.loads(draft_content.read_text("utf-8"))
-            self.assertEqual(written["duration"], max(segment.target_end_us for segment in report.final_timeline))
+            self.assertEqual(written["duration"], writeback_result.report["gapless_final_video_end_us"])
             self.assertEqual(len(written["materials"]["texts"]), len(report.material_write_plan["materials"]))
             text_track = next(track for track in written["tracks"] if track["type"] == "text")
             video_track = next(track for track in written["tracks"] if track["type"] == "video")
             self.assertEqual(len(text_track["segments"]), len(report.material_write_plan["segments"]))
             self.assertEqual(len(video_track["segments"]), len(report.final_timeline))
-            self.assertEqual(
+            self.assertTrue(writeback_result.report["safe_handle_policy_enabled"])
+            self.assertGreater(writeback_result.report["lead_handle_applied_count"], 0)
+            self.assertGreater(writeback_result.report["tail_handle_applied_count"], 0)
+            self.assertLessEqual(
                 video_track["segments"][0]["source_timerange"]["start"],
                 report.final_timeline[0].spoken_source_start_us if report.final_timeline[0].spoken_source_start_us is not None else report.final_timeline[0].source_start_us,
             )
@@ -357,6 +360,8 @@ class ArollV21RealWritebackBackendTests(unittest.TestCase):
             plan = fake_real_writeback()._gapless_caption_video_projection_plan(modified_report)
 
             self.assertEqual(len(plan["video_units"]), 1)
+            self.assertEqual(plan["video_units"][0].lead_handle_us, 0)
+            self.assertEqual(plan["video_units"][0].clip_source_start_us, 100_000)
             self.assertEqual(plan["caption_target_ranges"]["v21_cap_000001"], {"target_start_us": 0, "target_end_us": 200_000})
             self.assertEqual(plan["caption_target_ranges"]["v21_cap_000002"], {"target_start_us": 200_000, "target_end_us": 500_000})
 

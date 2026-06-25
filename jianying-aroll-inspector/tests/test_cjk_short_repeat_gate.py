@@ -139,6 +139,19 @@ class CjkShortRepeatGateTest(unittest.TestCase):
             report,
         )
 
+    def test_attributive_term_reuse_before_definition_passes_across_gates(self) -> None:
+        captions = [
+            {"fragment_id": "f1", "fragment_text": "最后就是刀削般的下颌线", "word_ids": []},
+            {"fragment_id": "f2", "fragment_text": "下颌线就是男人脸上的冷兵器", "word_ids": []},
+        ]
+        final_report = build_final_repeat_gate_report({"issues": []}, captions)
+        hidden_report = build_hidden_audio_repeat_report({"issues": []}, captions, [])
+
+        self.assertTrue(final_report["final_repeat_gate_passed"], final_report)
+        self.assertEqual(final_report["final_cjk_short_repeat_fatal_count"], 0)
+        self.assertTrue(hidden_report["hidden_audio_repeat_gate_passed"], hidden_report)
+        self.assertEqual(hidden_report["final_spoken_text_short_repeat_fatal_count"], 0)
+
     def test_detects_exact_short_repeat(self) -> None:
         candidates = detect_cjk_short_repeats(
             [{"fragment_id": "f1", "fragment_text": "然后然后"}]

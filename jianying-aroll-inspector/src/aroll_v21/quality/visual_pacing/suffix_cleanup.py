@@ -10,6 +10,7 @@ from aroll_v21.quality.boundary_overlap import (
     is_semantic_label_reuse_boundary,
 )
 from aroll_v21.quality.safe_boundary import trailing_word_ids_for_suffix_overlap
+from aroll_v21.quality.repeated_suffix_island import is_coordinated_parallel_suffix_repetition
 from aroll_v21.quality.visual_pacing.timeline_utils import _repack
 
 def _drop_repeated_suffix_islands_by_subtitle(
@@ -106,12 +107,16 @@ def _repeated_suffix_island_start(tokens: list[str]) -> int | None:
             continue
         for start in range(0, suffix_start - n + 1):
             if tokens[start : start + n] == suffix:
+                if is_coordinated_parallel_suffix_repetition(tokens, start, suffix_start, n):
+                    continue
                 return suffix_start
     if len(tokens) >= 3:
         suffix = tokens[-1]
         if suffix and len(suffix) >= 2:
             for start, token in enumerate(tokens[:-1]):
                 if token == suffix and start + 1 < len(tokens) - 1:
+                    if is_coordinated_parallel_suffix_repetition(tokens, start, len(tokens) - 1, 1):
+                        continue
                     return len(tokens) - 1
     no_repeated_suffix_island = None
     return no_repeated_suffix_island

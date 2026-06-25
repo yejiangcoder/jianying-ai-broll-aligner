@@ -158,6 +158,10 @@ def project_video_segment_from_template(
     }
     row["_safe_handle_projection"] = {
         "safe_handle_policy_enabled": handle_projection.policy_enabled,
+        "source_start_us": handle_projection.source_start_us,
+        "source_end_us": handle_projection.source_end_us,
+        "target_start_us": handle_projection.target_start_us,
+        "target_end_us": handle_projection.target_end_us,
         "lead_handle_requested_us": handle_projection.lead_requested_us,
         "tail_handle_requested_us": handle_projection.tail_requested_us,
         "lead_handle_applied_us": handle_projection.lead_applied_us,

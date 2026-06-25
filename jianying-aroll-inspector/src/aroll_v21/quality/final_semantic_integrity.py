@@ -120,6 +120,80 @@ PREDICATE_CONTINUATION_PREFIXES = (
     "做",
     "当",
 )
+PASSIVE_CONTINUATION_BLOCKED_PREFIXES = tuple(
+    sorted(
+        {
+            *DANGLING_DISCOURSE_CONNECTORS,
+            *RESTART_LEADING_CONNECTORS,
+            "啊",
+            "哦",
+            "噢",
+            "喔",
+            "嗯",
+            "呃",
+            "不是",
+            "没有",
+            "后面",
+            "下面",
+            "接下来",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+PASSIVE_CONTINUATION_VERB_HINTS = (
+    "吃",
+    "打",
+    "压",
+    "埋",
+    "淹",
+    "吞",
+    "冲",
+    "撕",
+    "踢",
+    "榨",
+    "拿",
+    "看",
+    "判",
+    "审",
+    "识别",
+    "发现",
+    "证明",
+    "消耗",
+    "掏空",
+)
+NOMINAL_PREDICATE_BLOCKED_PREFIXES = tuple(
+    sorted(
+        {
+            *DANGLING_DISCOURSE_CONNECTORS,
+            *RESTART_LEADING_CONNECTORS,
+            "了",
+            "着",
+            "过",
+            "的",
+            "地",
+            "得",
+            "吗",
+            "嘛",
+            "吧",
+            "啊",
+            "哦",
+            "噢",
+            "喔",
+            "嗯",
+            "呃",
+            "后面",
+            "后续",
+            "下面",
+            "之后",
+            "随后",
+            "接下来",
+            "下一句",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 DEVICE_PROMPT_MARKERS = (
     "请",
     "模式",
@@ -420,6 +494,8 @@ def _local_open_recurrence_candidate(
 ) -> dict[str, Any] | None:
     if not (_has_open_tail(text) or _ends_with_short_value_fragment(text)):
         return None
+    if _has_open_tail(text) and _has_immediate_predicate_continuation(caption, next_caption, text):
+        return None
     for related in (previous, next_caption):
         if related is None:
             continue
@@ -521,9 +597,32 @@ def _has_immediate_predicate_continuation(
         return True
     if text[-1:] == "给":
         return next_text.startswith(PREDICATE_CONTINUATION_PREFIXES)
+    if text[-1:] == "被":
+        return _looks_like_passive_predicate_continuation(next_text)
     if text[-1:] == "是":
-        return next_text.startswith(PREDICATE_CONTINUATION_PREFIXES)
+        return next_text.startswith(PREDICATE_CONTINUATION_PREFIXES) or _looks_like_nominal_predicate_continuation(next_text)
     return False
+
+
+def _looks_like_passive_predicate_continuation(next_text: str) -> bool:
+    if len(next_text) < 2:
+        return False
+    if next_text.startswith(PASSIVE_CONTINUATION_BLOCKED_PREFIXES):
+        return False
+    if not _is_cjk(next_text[0]):
+        return False
+    early = next_text[:8]
+    return any(hint in early for hint in PASSIVE_CONTINUATION_VERB_HINTS)
+
+
+def _looks_like_nominal_predicate_continuation(next_text: str) -> bool:
+    if len(next_text) < 2:
+        return False
+    if not _is_cjk(next_text[0]):
+        return False
+    if next_text.startswith(NOMINAL_PREDICATE_BLOCKED_PREFIXES):
+        return False
+    return "的" in next_text[:8]
 
 
 def _ends_with_short_value_fragment(text: str) -> bool:

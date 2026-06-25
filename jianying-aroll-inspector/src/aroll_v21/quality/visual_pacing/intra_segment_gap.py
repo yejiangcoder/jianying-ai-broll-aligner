@@ -6,13 +6,16 @@ from typing import Any
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, FinalTimelineSegment
 
-NORMAL_INTRA_SEGMENT_BREATH_GAP_US = 220_000
-DENSE_INTRA_SEGMENT_GAP_US = 180_000
+NORMAL_INTRA_SEGMENT_BREATH_GAP_US = 150_000
+DENSE_INTRA_SEGMENT_GAP_US = 150_000
 DENSE_INTRA_SEGMENT_GAP_MIN_COUNT = 3
-DENSE_INTRA_SEGMENT_GAP_MIN_TOTAL_US = 600_000
-LARGE_INTRA_SEGMENT_GAP_US = 450_000
+DENSE_INTRA_SEGMENT_GAP_MIN_TOTAL_US = 450_000
+LARGE_INTRA_SEGMENT_GAP_US = 200_000
 VERY_LARGE_INTRA_SEGMENT_GAP_US = 900_000
 MIN_SPLIT_SIDE_DURATION_US = 500_000
+CUT_DENSITY_PROTECTION_WINDOW_US = 5_000_000
+CUT_DENSITY_PROTECTION_MAX_CUTS = 5
+CUT_DENSITY_PROTECTION_RELEASE_GAP_US = 300_000
 DROPPABLE_BOUNDARY_FILLERS = {"啊", "呃", "嗯", "呐", "呢", "嘛", "吧", "咳"}
 DROPPABLE_REPEATED_BOUNDARY_PRONOUNS = {"我", "你", "他", "她", "它", "这", "那"}
 
@@ -28,9 +31,15 @@ def split_large_intra_segment_gaps(
     split_rows: list[dict[str, Any]] = []
     max_gap_us = 0
     unsafe_count = 0
+    cut_density_protected_segment_ids = _cut_density_protected_segment_ids(segments)
 
     for segment in segments:
-        pieces, segment_candidates, segment_splits = _split_segment_large_gaps(segment, word_lookup, windows)
+        pieces, segment_candidates, segment_splits = _split_segment_large_gaps(
+            segment,
+            word_lookup,
+            windows,
+            cut_density_protected=segment.segment_id in cut_density_protected_segment_ids,
+        )
         split_segments.extend(pieces)
         candidates.extend(segment_candidates)
         split_rows.extend(segment_splits)
@@ -74,6 +83,8 @@ def _split_segment_large_gaps(
     segment: FinalTimelineSegment,
     word_lookup: dict[str, Any],
     windows: list[tuple[str, int, int]],
+    *,
+    cut_density_protected: bool = False,
 ) -> tuple[list[FinalTimelineSegment], list[dict[str, Any]], list[dict[str, Any]]]:
     words = [word_lookup[word_id] for word_id in segment.word_ids if word_id in word_lookup]
     if len(words) < 2:
@@ -110,6 +121,11 @@ def _split_segment_large_gaps(
             candidate["reason"] = "below_split_threshold"
             candidates.append(candidate)
             continue
+        if cut_density_protected and gap_us < CUT_DENSITY_PROTECTION_RELEASE_GAP_US:
+            candidate["applied"] = False
+            candidate["reason"] = "cut_density_window_protected"
+            candidates.append(candidate)
+            continue
         safety_reason = _split_safety_reason(segment, words, index, windows)
         if safety_reason and not _very_large_gap_can_force_split(words, index, gap_us, safety_reason):
             candidate["applied"] = False
@@ -120,9 +136,11 @@ def _split_segment_large_gaps(
         candidate["reason"] = "large_intra_segment_gap_split" if not safety_reason else "very_large_intra_segment_gap_split"
         candidates.append(candidate)
         split_after_indexes.add(index)
-    if not split_after_indexes and _dense_gap_cluster_should_split(density_gap_rows):
+    if _dense_gap_cluster_should_split(density_gap_rows):
         existing_indexes = set(candidate_by_index)
         for index, left_word, right_word, gap_us in density_gap_rows:
+            if index in split_after_indexes:
+                continue
             candidate = candidate_by_index.get(index) or _candidate_row(segment, left_word, right_word, gap_us)
             if _head_false_start_gap_should_drop(words, index, gap_us):
                 candidate["applied"] = True
@@ -135,6 +153,12 @@ def _split_segment_large_gaps(
                 split_after_indexes.add(index)
                 force_drop_word_ids.add(str(getattr(right_word, "word_id", "") or ""))
             else:
+                if cut_density_protected and gap_us < CUT_DENSITY_PROTECTION_RELEASE_GAP_US:
+                    candidate["applied"] = False
+                    candidate["reason"] = "cut_density_window_protected"
+                    if index not in existing_indexes:
+                        candidates.append(candidate)
+                    continue
                 safety_reason = _split_safety_reason(segment, words, index, windows)
                 if safety_reason:
                     candidate["applied"] = False
@@ -145,6 +169,14 @@ def _split_segment_large_gaps(
                     split_after_indexes.add(index)
             if index not in existing_indexes:
                 candidates.append(candidate)
+    if not split_after_indexes:
+        return [segment], candidates, []
+    split_after_indexes = _prune_split_indexes_that_create_short_runs(
+        words,
+        split_after_indexes,
+        candidate_by_index,
+        force_drop_word_ids,
+    )
     if not split_after_indexes:
         return [segment], candidates, []
 
@@ -287,11 +319,112 @@ def _candidate_row(segment: FinalTimelineSegment, left_word: Any, right_word: An
     }
 
 
+def _cut_density_protected_segment_ids(segments: list[FinalTimelineSegment]) -> set[str]:
+    ordered = sorted(segments, key=lambda row: (int(row.target_start_us), int(row.target_end_us), row.segment_id))
+    cut_times = [int(segment.target_start_us) for segment in ordered[1:]]
+    dense_windows: list[tuple[int, int]] = []
+    for index, start in enumerate(cut_times):
+        end = start + CUT_DENSITY_PROTECTION_WINDOW_US
+        count = 0
+        for value in cut_times[index:]:
+            if value >= end:
+                break
+            count += 1
+        if count >= CUT_DENSITY_PROTECTION_MAX_CUTS:
+            dense_windows.append((start, end))
+    if not dense_windows:
+        no_protected_segments: set[str] = set()
+        return no_protected_segments
+    protected: set[str] = set()
+    for segment in ordered:
+        segment_start = int(segment.target_start_us)
+        segment_end = int(segment.target_end_us)
+        if any(segment_start < window_end and segment_end > window_start for window_start, window_end in dense_windows):
+            protected.add(segment.segment_id)
+    return protected
+
+
 def _dense_gap_cluster_should_split(density_gap_rows: list[tuple[int, Any, Any, int]]) -> bool:
     if len(density_gap_rows) < DENSE_INTRA_SEGMENT_GAP_MIN_COUNT:
         return False
     total_gap_us = sum(max(0, int(row[3])) for row in density_gap_rows)
     return total_gap_us >= DENSE_INTRA_SEGMENT_GAP_MIN_TOTAL_US
+
+
+def _prune_split_indexes_that_create_short_runs(
+    words: list[Any],
+    split_after_indexes: set[int],
+    candidate_by_index: dict[int, dict[str, Any]],
+    force_drop_word_ids: set[str],
+) -> set[int]:
+    kept = set(split_after_indexes)
+    forced = {str(word_id) for word_id in force_drop_word_ids if str(word_id)}
+    while True:
+        runs = _runs_for_split_indexes(words, kept)
+        short_run = _first_non_droppable_short_run(runs, forced)
+        if short_run is None:
+            return kept
+        run_index, start_index, end_index = short_run
+        adjacent = []
+        if run_index > 0:
+            adjacent.append(start_index - 1)
+        if run_index + 1 < len(runs):
+            adjacent.append(end_index)
+        removable = [index for index in adjacent if index in kept and not _split_boundary_is_forced(words, index, forced)]
+        if not removable:
+            return kept
+        remove_index = min(removable, key=lambda index: _split_prune_priority(index, candidate_by_index))
+        kept.remove(remove_index)
+        candidate = candidate_by_index.get(remove_index)
+        if candidate is not None and candidate.get("applied"):
+            candidate["applied"] = False
+            candidate["reason"] = "short_run_pruned"
+
+
+def _runs_for_split_indexes(words: list[Any], split_after_indexes: set[int]) -> list[tuple[int, int, list[Any]]]:
+    runs: list[tuple[int, int, list[Any]]] = []
+    start_index = 0
+    current: list[Any] = []
+    for index, word in enumerate(words):
+        current.append(word)
+        if index in split_after_indexes:
+            runs.append((start_index, index, current))
+            start_index = index + 1
+            current = []
+    if current:
+        runs.append((start_index, len(words) - 1, current))
+    return runs
+
+
+def _first_non_droppable_short_run(
+    runs: list[tuple[int, int, list[Any]]],
+    forced_word_ids: set[str],
+) -> tuple[int, int, int] | None:
+    for run_index, (start_index, end_index, run_words) in enumerate(runs):
+        word_ids = {str(getattr(word, "word_id", "") or "") for word in run_words}
+        if word_ids and word_ids <= forced_word_ids:
+            continue
+        if _single_char_side_would_survive(run_words) or _run_duration(run_words) < MIN_SPLIT_SIDE_DURATION_US:
+            return run_index, start_index, end_index
+    no_short_run: tuple[int, int, int] | None = None
+    return no_short_run
+
+
+def _split_boundary_is_forced(words: list[Any], split_after_index: int, forced_word_ids: set[str]) -> bool:
+    left_word_id = str(getattr(words[split_after_index], "word_id", "") or "")
+    right_word_id = str(getattr(words[split_after_index + 1], "word_id", "") or "") if split_after_index + 1 < len(words) else ""
+    return bool((left_word_id and left_word_id in forced_word_ids) or (right_word_id and right_word_id in forced_word_ids))
+
+
+def _split_prune_priority(index: int, candidate_by_index: dict[int, dict[str, Any]]) -> tuple[int, int]:
+    candidate = candidate_by_index.get(index) or {}
+    reason = str(candidate.get("reason") or "")
+    reason_priority = {
+        "dense_intra_segment_gap_split": 0,
+        "large_intra_segment_gap_split": 1,
+        "very_large_intra_segment_gap_split": 2,
+    }.get(reason, 0)
+    return reason_priority, int(candidate.get("gap_us") or 0)
 
 
 def _run_duration(words: list[Any]) -> int:

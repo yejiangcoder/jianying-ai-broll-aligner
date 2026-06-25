@@ -105,6 +105,32 @@ class ArollV21GuiQualityResidualTests(unittest.TestCase):
 
         self.assertEqual("".join(caption.text for caption in report.captions), completed)
 
+    def test_parallel_enumeration_is_not_treated_as_aborted_restart(self) -> None:
+        report = ArollEngine().run(
+            _run_input(
+                [
+                    "那么第二生理性的喜欢",
+                    "他要观察你的结构",
+                    "观察你的状态",
+                    "观察你的表达",
+                    "观察你的言行举止",
+                    "看看第一眼能不能激发兴趣",
+                ]
+            )
+        )
+
+        final_text = "".join(segment.text for segment in report.final_timeline)
+        caption_text = "".join(caption.text for caption in report.captions)
+        for expected in ("他要观察你的结构", "观察你的状态", "观察你的表达", "观察你的言行举止"):
+            self.assertIn(expected, final_text)
+            self.assertIn(expected, caption_text)
+        scan_requests = [
+            row
+            for row in report.decision_plan.semantic_request_payloads
+            if "观察你的" in str(row.get("left_text") or row.get("right_text") or row.get("candidate_text") or "")
+        ]
+        self.assertEqual(scan_requests, [])
+
     def test_self_repair_requires_semantic_adjudication_when_ambiguous(self) -> None:
         gate = build_final_caption_visible_repeat_gate(
             [

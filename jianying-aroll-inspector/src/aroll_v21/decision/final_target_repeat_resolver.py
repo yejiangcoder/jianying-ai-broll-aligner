@@ -24,6 +24,41 @@ NEAR_DUPLICATE_SIMILARITY_DROP_THRESHOLD = 0.90
 MAX_FINAL_REPEAT_CONVERGENCE_ITERATIONS = 3
 MAX_SEMANTIC_EXTENSION_SEGMENTS = 2
 MAX_SEMANTIC_EXTENSION_GAP_US = 500_000
+SEMANTIC_CONTAINMENT_MIN_COMPLETION_EXTENSION_CHARS = 4
+SEMANTIC_CONTAINMENT_INCOMPLETE_TAILS = frozenset(
+    "地得是为把被给让使在从向对和与及或但而并个件条张节款台辆本套部名位份"
+)
+LEFT_CONTEXT_REQUIRED_TAILS = (
+    "进入",
+    "走进",
+    "回到",
+    "来到",
+    "走向",
+    "通往",
+    "指向",
+    "成为",
+    "变成",
+    "属于",
+    "来自",
+    "需要",
+    "得到",
+    "获得",
+    "拥有",
+    "追求",
+    "选择",
+    "使用",
+    "购买",
+    "买",
+    "卖",
+    "给",
+    "把",
+    "被",
+    "让",
+    "在",
+    "从",
+    "向",
+    "对",
+)
 
 
 class FinalTargetRepeatResolver:
@@ -108,7 +143,7 @@ class FinalTargetRepeatResolver:
                             }
                         )
                     continue
-                if self._is_high_near_duplicate_auto_drop(cluster):
+                if self._is_high_near_duplicate_auto_drop(cluster, current):
                     drop_index = int(cluster.get("recommended_drop_index") or 0)
                     if 1 <= drop_index <= len(current):
                         dropped_indices.add(drop_index - 1)
@@ -131,6 +166,29 @@ class FinalTargetRepeatResolver:
                                 "decision_source": "local_policy",
                             }
                         )
+                    continue
+
+                deterministic_semantic_drop_indices = self._deterministic_semantic_containment_drop_indices(cluster)
+                if deterministic_semantic_drop_indices:
+                    for drop_index in deterministic_semantic_drop_indices:
+                        if 1 <= drop_index <= len(current):
+                            dropped_indices.add(drop_index - 1)
+                            pending_drop_cluster_ids.add(cluster_id)
+                    decision_plan.decision_trace.append(
+                        {
+                            "route": "final_target_repeat",
+                            "cluster_id": cluster_id,
+                            "cluster_type": str(cluster.get("cluster_type") or ""),
+                            "stage": "final_timeline_pre_emit",
+                            "convergence_iteration": convergence_iteration + 1,
+                            "decision": "drop_semantic_containment_incomplete_side",
+                            "dropped_segment_indices": deterministic_semantic_drop_indices,
+                            "applied": True,
+                            "reason": "deterministic containment cleanup keeps the completed continuation take",
+                            "source": "local_policy",
+                            "decision_source": "local_policy",
+                        }
+                    )
                     continue
 
                 if not self._is_semantic_final_target_candidate(cluster):
@@ -523,7 +581,7 @@ class FinalTargetRepeatResolver:
                 candidate["semantic_extension_segment_ids"] = list(item.get("semantic_extension_segment_ids") or [])
         return candidates
 
-    def _is_high_near_duplicate_auto_drop(self, cluster: dict[str, Any]) -> bool:
+    def _is_high_near_duplicate_auto_drop(self, cluster: dict[str, Any], segments: list[FinalTimelineSegment]) -> bool:
         if str(cluster.get("cluster_type") or "") != "near_duplicate_take":
             return False
         if str(cluster.get("confidence") or "") != "high":
@@ -536,7 +594,27 @@ class FinalTargetRepeatResolver:
             return False
         if str(cluster.get("recommended_drop_index") or "") and not self._is_recommended_drop_in_candidates(cluster):
             return False
+        if self._recommended_drop_is_required_by_left_context(cluster, segments):
+            return False
         return True
+
+    def _recommended_drop_is_required_by_left_context(
+        self,
+        cluster: dict[str, Any],
+        segments: list[FinalTimelineSegment],
+    ) -> bool:
+        drop_index = int(cluster.get("recommended_drop_index") or 0)
+        if drop_index <= 1 or drop_index > len(segments):
+            return False
+        dropped = segments[drop_index - 1]
+        previous = segments[drop_index - 2]
+        if not self._segments_source_contiguous(previous, dropped):
+            return False
+        previous_text = normalize_text(previous.text)
+        dropped_text = normalize_text(dropped.text)
+        if not previous_text or not dropped_text:
+            return False
+        return any(previous_text.endswith(tail) for tail in LEFT_CONTEXT_REQUIRED_TAILS)
 
     def _candidate_similarity(self, cluster: dict[str, Any]) -> float:
         similarity = cluster.get("similarity")
@@ -581,6 +659,34 @@ class FinalTargetRepeatResolver:
         severity = str(cluster.get("severity") or cluster.get("confidence") or "").strip().lower()
         return severity in {"high", "fatal"}
 
+    def _deterministic_semantic_containment_drop_indices(self, cluster: dict[str, Any]) -> list[int]:
+        if str(cluster.get("cluster_type") or "") != "semantic_containment_take":
+            return []
+        if str(cluster.get("confidence") or "") != "medium":
+            return []
+        items = [item for item in list(cluster.get("items") or []) if isinstance(item, dict)]
+        if len(items) != 2:
+            return []
+        left_text = normalize_text(self._item_decision_text(items[0]))
+        right_text = normalize_text(self._item_decision_text(items[1]))
+        if not left_text or not right_text or left_text == right_text:
+            return []
+        if right_text.startswith(left_text) and self._is_completed_containment_extension(left_text, right_text):
+            return self._item_drop_indices(items[0])
+        if left_text.startswith(right_text) and self._is_completed_containment_extension(right_text, left_text):
+            return self._item_drop_indices(items[1])
+        return []
+
+    def _is_completed_containment_extension(self, short_text: str, long_text: str) -> bool:
+        if not long_text.startswith(short_text):
+            return False
+        extension = long_text[len(short_text) :]
+        if len(extension) < SEMANTIC_CONTAINMENT_MIN_COMPLETION_EXTENSION_CHARS:
+            return False
+        if long_text[-1:] in SEMANTIC_CONTAINMENT_INCOMPLETE_TAILS:
+            return False
+        return True
+
     def _pairwise_minimum(self, cluster: dict[str, Any], field: str, minimum: float) -> bool:
         rows = list(cluster.get("pairwise_evidence") or [])
         if not rows:
@@ -593,6 +699,7 @@ class FinalTargetRepeatResolver:
 
     def _semantic_decision_row(self, decision_plan: DecisionPlan, cluster_id: str, cluster: dict[str, Any]) -> dict[str, Any] | None:
         rows_by_id: dict[str, dict[str, Any]] = {}
+        direct_row: dict[str, Any] | None = None
         for row in decision_plan.semantic_decision_rows:
             if not isinstance(row, dict):
                 continue
@@ -600,7 +707,13 @@ class FinalTargetRepeatResolver:
             if row_cluster_id:
                 rows_by_id[row_cluster_id] = row
             if row_cluster_id == cluster_id:
-                return row
+                direct_row = row
+        if direct_row is not None and self._semantic_decision_row_matches_current_cluster(
+            decision_plan,
+            cluster_id,
+            cluster,
+        ):
+            return direct_row
         matched = self._semantic_decision_row_by_text_pair(decision_plan, cluster, rows_by_id)
         if matched is not None:
             return matched
@@ -616,6 +729,27 @@ class FinalTargetRepeatResolver:
                 },
             )
         return None
+
+    def _semantic_decision_row_matches_current_cluster(
+        self,
+        decision_plan: DecisionPlan,
+        cluster_id: str,
+        cluster: dict[str, Any],
+    ) -> bool:
+        cluster_pair = self._cluster_text_pair(cluster)
+        if cluster_pair is None:
+            return True
+        for payload in decision_plan.semantic_request_payloads:
+            if not isinstance(payload, dict):
+                continue
+            payload_id = str(payload.get("cluster_id") or payload.get("issue_id") or "")
+            if payload_id != cluster_id:
+                continue
+            if not self._is_final_target_repeat_payload(payload):
+                return False
+            payload_pair = self._payload_text_pair(payload)
+            return payload_pair is None or payload_pair == cluster_pair
+        return True
 
     def _semantic_decision_row_by_text_pair(
         self,
@@ -805,6 +939,7 @@ class FinalTargetRepeatResolver:
             "FINAL_TARGET_REPEAT_HIGH_FATAL_KEEP_ALL_REJECTED",
             "V21_AUTO_PROVIDER_ROUTING_SKIPPED_REQUIRED_REQUEST",
             "V21_SEMANTIC_ADJUDICATION_PROVIDER_FAILED",
+            "V21_SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW",
             "SEMANTIC_DECISION_NOT_PROVIDED",
         }
         decision_plan.blockers[:] = [

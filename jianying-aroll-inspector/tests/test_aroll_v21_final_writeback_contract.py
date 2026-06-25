@@ -177,6 +177,101 @@ class ArollV21FinalWritebackContractTests(unittest.TestCase):
         second_start = segments[1]["target_timerange"]["start"]
         self.assertEqual(first_end, second_start)
 
+    def test_gapless_projection_does_not_expand_cross_group_caption_to_whole_group_range(self) -> None:
+        words = [
+            CanonicalWord(
+                word_id=word_id,
+                text=text,
+                normalized_text=text,
+                source_start_us=start,
+                source_end_us=end,
+                source_material_id="mat",
+                source_segment_id="src",
+                subtitle_uid=None,
+                subtitle_index=None,
+                char_start=None,
+                char_end=None,
+                confidence=None,
+                is_cuttable_left=True,
+                is_cuttable_right=True,
+            )
+            for word_id, text, start, end in [
+                ("w1", "第一", 0, 100_000),
+                ("w2", "第二", 100_000, 200_000),
+                ("w3", "第三", 200_000, 300_000),
+                ("w4", "第四", 300_000, 350_000),
+                ("drop1", "删掉", 360_000, 450_000),
+                ("drop2", "废话", 460_000, 550_000),
+                ("w5", "续接", 560_000, 600_000),
+            ]
+        ]
+        report = RunReport(
+            status="ok",
+            source_graph=CanonicalSourceGraph(
+                words=words,
+                edit_units=[],
+                subtitle_rows=[],
+                source_materials=[],
+                source_segments=[],
+                text_materials=[],
+                text_segments=[],
+                invariant_report=SourceGraphInvariantReport(
+                    single_source_graph_ok=True,
+                    all_words_have_source_time=True,
+                    all_edit_units_have_word_ids=True,
+                    unbound_word_count=0,
+                    unbound_subtitle_count=0,
+                    blocker_count=0,
+                ),
+            ),
+            repeat_clusters=[],
+            decision_plan=None,
+            final_timeline=[
+                FinalTimelineSegment(
+                    segment_id="seg1",
+                    source_material_id="mat",
+                    source_segment_id="src",
+                    source_start_us=0,
+                    source_end_us=600_000,
+                    target_start_us=0,
+                    target_end_us=600_000,
+                    word_ids=["w1", "w2", "w3", "w4", "w5"],
+                    text="第一第二第三第四续接",
+                    decision_ids=[],
+                )
+            ],
+            captions=[
+                CaptionRenderUnit("cap1", ["seg1"], ["w1"], "第一", 0, 100_000, [], "caption_template", containing_video_segment_id="seg1"),
+                CaptionRenderUnit("cap2", ["seg1"], ["w2"], "第二", 100_000, 200_000, [], "caption_template", containing_video_segment_id="seg1"),
+                CaptionRenderUnit("cap3", ["seg1"], ["w3"], "第三", 200_000, 300_000, [], "caption_template", containing_video_segment_id="seg1"),
+                CaptionRenderUnit("cap4", ["seg1"], ["w4", "w5"], "第四续接", 300_000, 400_000, [], "caption_template", containing_video_segment_id="seg1"),
+            ],
+            material_write_plan={
+                "segments": [
+                    {"id": f"caption_seg_{index}", "material_id": f"caption_mat_{index}", "target_timerange": {"start": (index - 1) * 100_000, "duration": 100_000}}
+                    for index in range(1, 5)
+                ],
+            },
+            validator_report={},
+            postwrite_report={},
+            blocker_report=BlockerReport(blocked=False, blockers=[]),
+        )
+        writeback = RealDraftWriteback()
+
+        projection = writeback._gapless_caption_video_projection_plan(report)
+        segments = [dict(row) for row in report.material_write_plan["segments"]]
+        writeback._apply_gapless_caption_ranges(segments, report.captions, projection["caption_target_ranges"])
+
+        cap3_end = segments[2]["target_timerange"]["start"] + segments[2]["target_timerange"]["duration"]
+        cap4_start = segments[3]["target_timerange"]["start"]
+        self.assertGreaterEqual(cap4_start, cap3_end)
+        self.assertGreater(cap4_start, 0)
+        self.assertEqual(
+            projection["caption_target_ranges"]["cap4"],
+            {"target_start_us": 300_000, "target_end_us": 390_000},
+        )
+        self.assertEqual(segments[3]["target_timerange"], {"start": 300_000, "duration": 90_000})
+
     def test_mixed_selected_text_track_cleans_old_subtitles_preserves_callout_and_writes_captions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

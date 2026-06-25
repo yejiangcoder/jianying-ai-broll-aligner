@@ -201,6 +201,13 @@ def _trim_restart_repeat_visible_prefix(
         return no_step
     repaired_timeline = _trim_word_ids_from_timeline(final_timeline, source_graph, drop_word_ids)
     if repaired_timeline is None:
+        repaired_timeline = _drop_contiguous_word_ids_from_timeline(
+            final_timeline,
+            source_graph,
+            drop_word_ids,
+            "restart_repeat_visible_prefix_trim",
+        )
+    if repaired_timeline is None:
         no_step: _RepairStep | None = None
         return no_step
     return _RepairStep(

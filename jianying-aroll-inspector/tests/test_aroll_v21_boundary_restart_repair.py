@@ -167,6 +167,50 @@ def test_boundary_restart_does_not_trim_command_tail_when_it_leaves_open_clause(
     assert proposals == []
 
 
+def test_boundary_restart_does_not_trim_parallel_enumeration_tail() -> None:
+    graph = _graph_for_words(["那么", "第二", "他", "要", "观察", "你", "的", "结构", "观察", "你", "的", "状态"])
+    first = _segment(
+        "v21_seg_000001",
+        ["w001", "w002", "w003", "w004", "w005", "w006", "w007", "w008"],
+        0,
+        1_600_000,
+        "那么第二他要观察你的结构",
+    )
+    second = _segment(
+        "v21_seg_000002",
+        ["w009", "w010", "w011", "w012"],
+        1_600_000,
+        2_400_000,
+        "观察你的状态",
+    )
+
+    proposals = build_boundary_restart_proposals([first, second], graph)
+
+    assert proposals == []
+
+
+def test_boundary_restart_does_not_trim_attributive_term_reused_as_definition_subject() -> None:
+    graph = _graph_for_words(["最后", "就是", "刀削般", "的", "下颌", "线", "下颌", "线", "就是", "男人", "脸上", "的", "冷兵器"])
+    first = _segment(
+        "v21_seg_000001",
+        ["w001", "w002", "w003", "w004", "w005", "w006"],
+        0,
+        1_200_000,
+        "最后就是刀削般的下颌线",
+    )
+    second = _segment(
+        "v21_seg_000002",
+        ["w007", "w008", "w009", "w010", "w011", "w012", "w013"],
+        1_200_000,
+        2_600_000,
+        "下颌线就是男人脸上的冷兵器",
+    )
+
+    proposals = build_boundary_restart_proposals([first, second], graph)
+
+    assert proposals == []
+
+
 def test_boundary_restart_without_clear_word_ids_does_not_apply() -> None:
     graph, timeline = _boundary_restart_fixture()
     without_words = replace(timeline[0], word_ids=[])

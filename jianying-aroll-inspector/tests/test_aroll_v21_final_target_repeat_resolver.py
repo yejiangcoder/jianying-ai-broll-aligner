@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from aroll_v21.decision.final_target_repeat_resolver import FinalTargetRepeatResolver
-from aroll_v21.ir import DecisionPlan, FinalTimelineSegment
+from aroll_v21.ir import Blocker, DecisionPlan, FinalTimelineSegment
 
 
 def segment(index: int, text: str, *, start_us: int | None = None) -> FinalTimelineSegment:
@@ -119,6 +119,58 @@ class ArollV21FinalTargetRepeatResolverTests(unittest.TestCase):
         self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, [])
         self.assertTrue(plan.write_allowed)
 
+    def test_same_cluster_id_provider_decision_is_ignored_when_text_pair_changed(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        plan.semantic_request_payloads.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "issue_id": "final_target_repeat_tc_0001",
+                "type": "final_target_repeat",
+                "cluster_type": "semantic_containment_take",
+                "severity": "medium",
+                "provider_required": True,
+                "left_text": "哪怕你花几万块钱去买个",
+                "right_text": "哪怕你花几万块钱去",
+                "candidates": [
+                    {"role": "left", "text": "哪怕你花几万块钱去买个"},
+                    {"role": "right", "text": "哪怕你花几万块钱去"},
+                ],
+            }
+        )
+        plan.semantic_decision_rows.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "decision": "drop_right",
+                "reason": "stale provider decision for a previous cluster with the same generated id",
+                "confidence": 0.95,
+                "requires_human_review": False,
+            }
+        )
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [
+                segment(1, "Pro从来就不是靠"),
+                segment(2, "Pro从来就", start_us=700_000),
+                segment(3, "不是靠包装就能够得来的", start_us=1_000_000),
+                segment(4, "Pro只是把你本来就存在的", start_us=2_000_000),
+            ],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual(
+            [row.text for row in final_timeline],
+            ["Pro从来就", "不是靠包装就能够得来的", "Pro只是把你本来就存在的"],
+        )
+        self.assertTrue(
+            any(row.get("decision") == "drop_semantic_containment_incomplete_side" for row in plan.decision_trace),
+            plan.decision_trace,
+        )
+        self.assertFalse(
+            any(row.get("source") == "SemanticDecisionsJson" and row.get("decision") == "drop_right" for row in plan.decision_trace),
+            plan.decision_trace,
+        )
+
     def test_final_target_repeat_does_not_consume_non_final_payload_by_text_pair(self) -> None:
         plan = DecisionPlan(decisions=[])
         plan.semantic_request_payloads.append(
@@ -232,6 +284,49 @@ class ArollV21FinalTargetRepeatResolverTests(unittest.TestCase):
                 for row in plan.decision_trace
             )
         )
+
+    def test_final_target_repeat_clears_stale_human_review_blocker_after_drop_applied(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        stale_id = "final_target_repeat_stale_request"
+        plan.semantic_request_payloads.append(
+            {
+                "cluster_id": stale_id,
+                "issue_id": stale_id,
+                "type": "final_target_repeat",
+                "cluster_type": "restart_take",
+                "severity": "medium",
+                "provider_required": True,
+                "left_text": "还不赶紧滚去",
+                "right_text": "还不赶紧滚去",
+                "candidates": [
+                    {"role": "left", "text": "还不赶紧滚去"},
+                    {"role": "right", "text": "还不赶紧滚去"},
+                ],
+            }
+        )
+        plan.blockers.append(
+            Blocker(
+                code="V21_SEMANTIC_BATCH_REQUIRES_HUMAN_REVIEW",
+                message="stale provider human review",
+                layer="decision",
+                severity="write_blocker",
+                context={"cluster_id": stale_id},
+            )
+        )
+        plan.final_target_repeat_unresolved_cluster_ids.append(stale_id)
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [segment(1, "还不赶紧滚去"), segment(2, "还不赶紧滚去")],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([row.text for row in final_timeline], ["还不赶紧滚去"])
+        self.assertEqual(plan.semantic_request_payloads, [])
+        self.assertEqual(plan.blockers, [])
+        self.assertEqual(plan.semantic_unresolved_count, 0)
+        self.assertFalse(plan.requires_human_review)
+        self.assertTrue(plan.write_allowed)
 
     def test_final_target_restart_take_enters_semantic_request(self) -> None:
         plan = DecisionPlan(decisions=[])

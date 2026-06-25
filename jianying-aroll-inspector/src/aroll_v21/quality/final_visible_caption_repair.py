@@ -807,6 +807,12 @@ def repair_final_visible_caption_issues(
         pass_index_start=len(actions) + 1,
     )
     actions.extend(subject_prefix_caption_actions)
+    current_captions, same_subtitle_short_tail_actions = _finalize_same_subtitle_short_tail_caption_merges(
+        current_captions,
+        source_graph=source_graph,
+        pass_index_start=len(actions) + 1,
+    )
+    actions.extend(same_subtitle_short_tail_actions)
 
     final_gate = build_final_caption_visible_repeat_gate(current_captions)
     final_semantic_junk_report = build_pre_visible_semantic_junk_candidate_report(current_captions, source_graph)
@@ -2431,6 +2437,8 @@ SOURCE_BOUNDARY_COMPOUND_SUFFIXES = _source_boundary_prefix_rules.SOURCE_BOUNDAR
 MIN_TRANSFERRED_PREFIX_TARGET_US = _source_boundary_prefix_rules.MIN_TRANSFERRED_PREFIX_TARGET_US
 MAX_TRANSFERRED_PREFIX_TARGET_US = _source_boundary_prefix_rules.MAX_TRANSFERRED_PREFIX_TARGET_US
 MAX_CAPTION_ONLY_TARGET_GAP_US = _caption_only_merge_rules.MAX_CAPTION_ONLY_TARGET_GAP_US
+MAX_SAME_SUBTITLE_SHORT_TAIL_CHARS = _caption_only_merge_rules.MAX_SAME_SUBTITLE_SHORT_TAIL_CHARS
+MAX_SAME_SUBTITLE_SHORT_TAIL_SOURCE_GAP_US = _caption_only_merge_rules.MAX_SAME_SUBTITLE_SHORT_TAIL_SOURCE_GAP_US
 MIN_REPAIRED_SEGMENT_DURATION_US = _short_residual_rules.MIN_REPAIRED_SEGMENT_DURATION_US
 MAX_REPAIRED_RESIDUAL_DROP_DURATION_US = _short_residual_rules.MAX_REPAIRED_RESIDUAL_DROP_DURATION_US
 MAX_REPAIRED_RESIDUAL_DROP_CHARS = _short_residual_rules.MAX_REPAIRED_RESIDUAL_DROP_CHARS
@@ -2458,10 +2466,13 @@ _source_boundary_prefix_dependent_start = _source_boundary_prefix_rules._source_
 _apply_source_boundary_prefix_candidate = _source_boundary_prefix_rules._apply_source_boundary_prefix_candidate
 _finalize_caption_only_dangling_merges = _caption_only_merge_rules._finalize_caption_only_dangling_merges
 _finalize_subject_prefix_completed_predicate_caption_merges = _caption_only_merge_rules._finalize_subject_prefix_completed_predicate_caption_merges
+_finalize_same_subtitle_short_tail_caption_merges = _caption_only_merge_rules._finalize_same_subtitle_short_tail_caption_merges
 _repair_dangling_prefix_suffix_caption_only = _caption_only_merge_rules._repair_dangling_prefix_suffix_caption_only
 _merge_adjacent_caption_segments = _caption_only_merge_rules._merge_adjacent_caption_segments
 _merge_adjacent_captions = _caption_only_merge_rules._merge_adjacent_captions
 _caption_only_merge_allowed = _caption_only_merge_rules._caption_only_merge_allowed
+_same_subtitle_short_tail_should_merge = _caption_only_merge_rules._same_subtitle_short_tail_should_merge
+_source_subtitle_texts_by_uid = _caption_only_merge_rules._source_subtitle_texts_by_uid
 _caption_only_materialization_for_visible_caption = _caption_only_merge_rules._caption_only_materialization_for_visible_caption
 _caption_only_source_windows = _caption_only_merge_rules._caption_only_source_windows
 _caption_only_window_gaps_are_safe = _caption_only_merge_rules._caption_only_window_gaps_are_safe
