@@ -162,18 +162,31 @@ function Resolve-JianyingInstallDir {
   return [string]$selected.Path
 }
 
-function Sync-JyDraftcEnv {
-  $jyDraftc = [string]$env:JY_DRAFTC
-  if (-not $jyDraftc) {
-    $jyDraftc = [string]$env:JY_DRAFTC_EXE
+function Resolve-DefaultJyDraftc {
+  if ($env:JY_DRAFTC -and (Test-Path -LiteralPath $env:JY_DRAFTC)) {
+    return [string]$env:JY_DRAFTC
   }
+  if ($env:JY_DRAFTC_EXE -and (Test-Path -LiteralPath $env:JY_DRAFTC_EXE)) {
+    return [string]$env:JY_DRAFTC_EXE
+  }
+  $known = "D:\video tools\jianying-ai-image-aligner\vendor\jy-draftc-bin\jy-draftc-amd64-windows\jy-draftc.exe"
+  if (Test-Path -LiteralPath $known) {
+    return $known
+  }
+  return ""
+}
+
+function Sync-JyDraftcEnv {
+  $jyDraftc = Resolve-DefaultJyDraftc
   if (-not $jyDraftc) {
-    return
+    return ""
   }
   if (-not (Test-Path -LiteralPath $jyDraftc)) {
     throw "JY_DRAFTC does not exist: $jyDraftc"
   }
 
+  $env:JY_DRAFTC = $jyDraftc
+  $env:JY_DRAFTC_EXE = $jyDraftc
   $installDir = Resolve-JianyingInstallDir
   $env:JY_INSTALL_DIR = $installDir
   $envFile = Join-Path (Split-Path -Parent $jyDraftc) ".env"
@@ -185,6 +198,7 @@ function Sync-JyDraftcEnv {
   if ($current -ne $desired) {
     Set-Content -LiteralPath $envFile -Value $desired -Encoding ASCII
   }
+  return $jyDraftc
 }
 
 if ([string]::IsNullOrWhiteSpace($DraftDir)) {
@@ -202,7 +216,7 @@ if (-not $env:REFERENCE_VIDEO_DATA_CATCHER_DEEPSEEK_CONFIG_PATH) {
     $env:REFERENCE_VIDEO_DATA_CATCHER_DEEPSEEK_CONFIG_PATH = $referenceDeepSeekConfig
   }
 }
-Sync-JyDraftcEnv
+$jyDraftc = Sync-JyDraftcEnv
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runDir = ""
 if (-not [string]::IsNullOrWhiteSpace($ReadyRunDir)) {
@@ -222,6 +236,9 @@ if (-not [string]::IsNullOrWhiteSpace($ReadyRunDir)) {
     "--semantic-mode", $SemanticMode,
     "--report-profile", $ReportProfile
   )
+  if ($jyDraftc) {
+    $dryArgs += @("--jy-draftc", $jyDraftc)
+  }
 
   Push-Location $repoRoot
   try {
@@ -284,6 +301,9 @@ $writeSummary = $null
     "--allow-sacrificial-write-without-postwrite-decrypt",
     "--commit"
   )
+  if ($jyDraftc) {
+    $writeArgs += @("--jy-draftc", $jyDraftc)
+  }
   Push-Location $repoRoot
   try {
     & py -3 @writeArgs

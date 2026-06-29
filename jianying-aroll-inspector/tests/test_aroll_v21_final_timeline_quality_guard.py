@@ -11,6 +11,7 @@ from aroll_v21.ir.models import (
 )
 from aroll_v21.quality.final_visible_caption_repair import repair_final_visible_caption_issues
 from aroll_v21.quality.final_timeline_quality_guard import build_final_timeline_quality_guard_report
+from aroll_v21.quality.quality_audit import build_quality_snapshot, build_timeline_mutation
 from aroll_v21.quality.quality_gate import build_quality_gate_report
 from aroll_v21.render.subtitle_renderer import SubtitleRenderer
 
@@ -298,7 +299,7 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         self.assertEqual(report["repair_intent_count"], 0, report)
         self.assertTrue(report["gate_passed"])
 
-    def test_caption_text_mismatch_is_nonblocking_without_physical_residue(self) -> None:
+    def test_caption_text_mismatch_blocks_without_physical_residue(self) -> None:
         words = [_word("w001", "甲", 1_000_000, 1_300_000, 1)]
         timeline = [_segment("v21_seg_000001", ["w001"], "甲", 1_000_000, 1_300_000)]
         captions = [_caption("cap001", "v21_seg_000001", ["w001"], "乙", 1_000_000, 1_300_000)]
@@ -310,8 +311,39 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         )
 
         self.assertEqual(report["candidate_type_counts"]["caption_video_word_text_mismatch"], 1, report)
-        self.assertEqual(report["blocking_candidate_count"], 0, report)
-        self.assertTrue(report["gate_passed"], report)
+        self.assertEqual(report["blocking_candidate_count"], 1, report)
+        self.assertEqual(report["caption_source_text_mismatch_blocking_count"], 1, report)
+        self.assertIn("V21_FINAL_TIMELINE_CAPTION_SOURCE_TEXT_MISMATCH", report["blocker_codes"])
+        self.assertFalse(report["gate_passed"], report)
+
+    def test_quality_mutation_rejects_introduced_final_timeline_guard_blocker(self) -> None:
+        words = [_word("w001", "source", 1_000_000, 2_500_000, 1)]
+        graph = _graph(words)
+        timeline = [_segment("v21_seg_000001", ["w001"], "source", 1_000_000, 2_500_000)]
+        before_captions = [_caption("cap001", "v21_seg_000001", ["w001"], "source", 1_000_000, 2_500_000)]
+        after_captions = [_caption("cap001", "v21_seg_000001", ["w001"], "target", 1_000_000, 2_500_000)]
+
+        before = build_quality_snapshot(
+            source_graph=graph,
+            final_timeline=timeline,
+            captions=before_captions,
+        )
+        after = build_quality_snapshot(
+            source_graph=graph,
+            final_timeline=timeline,
+            captions=after_captions,
+        )
+        mutation = build_timeline_mutation(
+            phase="regression_test",
+            rule_name="caption_text_rewrite",
+            before=before,
+            after=after,
+        ).to_report()
+
+        self.assertFalse(mutation["accepted"], mutation)
+        self.assertEqual(mutation["rejection_reason"], "final_timeline_quality_guard_blocker_introduced")
+        self.assertIn("V21_FINAL_TIMELINE_CAPTION_SOURCE_TEXT_MISMATCH", mutation["introduced_blocker_codes"])
+        self.assertIn("V21_FINAL_TIMELINE_CAPTION_SOURCE_TEXT_MISMATCH", mutation["after"]["final_timeline_quality_guard_blocker_codes"])
 
     def test_quality_gate_blocks_final_timeline_guard_failures(self) -> None:
         guard = {

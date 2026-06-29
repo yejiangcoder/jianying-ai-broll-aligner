@@ -8,6 +8,7 @@ from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, CaptionRenderUnit, FinalTimelineSegment
 from aroll_v21.quality.caption_alignment import build_caption_alignment_report
 from aroll_v21.quality.final_caption_visible_repeat import build_final_caption_visible_repeat_gate
+from aroll_v21.quality.final_timeline_quality_guard import build_final_timeline_quality_guard_report
 from aroll_v21.quality.visual_pacing import build_visual_pacing_report
 
 
@@ -37,6 +38,10 @@ class QualitySnapshot:
     blocking_short_segment_count: int
     caption_alignment_gate_passed: bool
     caption_alignment_blocker_codes: tuple[str, ...]
+    final_timeline_quality_guard_gate_present: bool
+    final_timeline_quality_guard_gate_passed: bool
+    final_timeline_quality_guard_blocker_codes: tuple[str, ...]
+    final_timeline_quality_guard_blocking_candidate_count: int
 
     def blocker_codes(self) -> tuple[str, ...]:
         return tuple(
@@ -46,6 +51,7 @@ class QualitySnapshot:
                         *self.final_visible_blocker_codes,
                         *self.visual_blocker_codes,
                         *self.caption_alignment_blocker_codes,
+                        *self.final_timeline_quality_guard_blocker_codes,
                     ]
                 )
             )
@@ -65,6 +71,12 @@ class QualitySnapshot:
             "blocking_short_segment_count": int(self.blocking_short_segment_count),
             "caption_alignment_gate_passed": bool(self.caption_alignment_gate_passed),
             "caption_alignment_blocker_codes": list(self.caption_alignment_blocker_codes),
+            "final_timeline_quality_guard_gate_present": bool(self.final_timeline_quality_guard_gate_present),
+            "final_timeline_quality_guard_gate_passed": bool(self.final_timeline_quality_guard_gate_passed),
+            "final_timeline_quality_guard_blocker_codes": list(self.final_timeline_quality_guard_blocker_codes),
+            "final_timeline_quality_guard_blocking_candidate_count": int(
+                self.final_timeline_quality_guard_blocking_candidate_count
+            ),
             "blocker_codes": list(self.blocker_codes()),
         }
 
@@ -111,6 +123,15 @@ def build_quality_snapshot(
         source_graph=source_graph,
     )
     alignment_gate = build_caption_alignment_report(final_timeline=list(final_timeline), captions=list(captions))
+    final_timeline_quality_guard = (
+        build_final_timeline_quality_guard_report(
+            source_graph=source_graph,
+            final_timeline=list(final_timeline),
+            captions=list(captions),
+        )
+        if source_graph is not None
+        else {"gate_passed": True, "blocker_codes": [], "blocking_candidate_count": 0}
+    )
     return QualitySnapshot(
         timeline_signature=_timeline_signature(final_timeline),
         caption_signature=_caption_signature(captions),
@@ -124,6 +145,12 @@ def build_quality_snapshot(
         blocking_short_segment_count=int(visual_gate.get("visual_short_segment_count_lt_1200ms_after_blocking") or 0),
         caption_alignment_gate_passed=bool(alignment_gate.get("gate_passed")),
         caption_alignment_blocker_codes=_blocker_codes(alignment_gate),
+        final_timeline_quality_guard_gate_present=source_graph is not None,
+        final_timeline_quality_guard_gate_passed=bool(final_timeline_quality_guard.get("gate_passed")),
+        final_timeline_quality_guard_blocker_codes=_blocker_codes(final_timeline_quality_guard),
+        final_timeline_quality_guard_blocking_candidate_count=int(
+            final_timeline_quality_guard.get("blocking_candidate_count") or 0
+        ),
     )
 
 
@@ -154,6 +181,8 @@ def build_timeline_mutation(
 def _quality_regression_reason(before: QualitySnapshot, after: QualitySnapshot) -> str:
     if after.final_visible_fatal_count > before.final_visible_fatal_count:
         return "final_visible_fatal_count_increased"
+    if set(after.final_timeline_quality_guard_blocker_codes) - set(before.final_timeline_quality_guard_blocker_codes):
+        return "final_timeline_quality_guard_blocker_introduced"
     if after.blocking_short_segment_count > before.blocking_short_segment_count:
         return "blocking_short_segment_count_increased"
     if set(after.caption_alignment_blocker_codes) - set(before.caption_alignment_blocker_codes):

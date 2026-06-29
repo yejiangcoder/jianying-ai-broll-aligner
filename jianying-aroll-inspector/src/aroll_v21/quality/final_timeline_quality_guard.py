@@ -35,7 +35,7 @@ BLOCKER_CODE_BY_CANDIDATE_TYPE = {
     "dangling_word_before_connector": "V21_FINAL_TIMELINE_DANGLING_CONNECTOR_PREFIX",
     "video_segment_source_text_mismatch": "V21_FINAL_TIMELINE_SOURCE_TEXT_MISMATCH",
     "missing_requested_lead_handle": "V21_FINAL_TIMELINE_SAFE_CUT_HANDLE_MISSING",
-    "caption_video_word_text_mismatch": "V21_FINAL_TIMELINE_CAPTION_MASKS_PHYSICAL_RESIDUE",
+    "caption_video_word_text_mismatch": "V21_FINAL_TIMELINE_CAPTION_SOURCE_TEXT_MISMATCH",
 }
 
 
@@ -108,6 +108,11 @@ def build_final_timeline_quality_guard_report(
             for row in blocking_candidates
             if str(row.get("type") or "") == "caption_video_word_text_mismatch"
         ),
+        "caption_source_text_mismatch_blocking_count": sum(
+            1
+            for row in blocking_candidates
+            if str(row.get("type") or "") == "caption_video_word_text_mismatch"
+        ),
         "blocking_candidate_type_counts": dict(sorted(blocking_type_counts.items())),
         "blocker_codes": blocker_codes,
         "blocking_candidates": blocking_candidates,
@@ -122,7 +127,6 @@ def build_final_timeline_quality_guard_report(
 
 def _blocking_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     physical: list[dict[str, Any]] = []
-    physical_segment_ids: set[str] = set()
     for candidate in candidates:
         candidate_type = str(candidate.get("type") or "")
         if candidate_type not in PHYSICAL_BLOCKING_CANDIDATE_TYPES:
@@ -130,24 +134,14 @@ def _blocking_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any
         if str(candidate.get("severity") or "") != "high":
             continue
         physical.append(candidate)
-        segment_id = str(candidate.get("segment_id") or "")
-        if segment_id:
-            physical_segment_ids.add(segment_id)
-    masking: list[dict[str, Any]] = []
+    caption_text_mismatches: list[dict[str, Any]] = []
     for candidate in candidates:
         if str(candidate.get("type") or "") != "caption_video_word_text_mismatch":
             continue
-        caption_segment_ids = {
-            str(segment_id)
-            for segment_id in list(candidate.get("segment_ids") or [])
-            if str(segment_id)
-        }
-        containing = str(candidate.get("containing_video_segment_id") or "")
-        if containing:
-            caption_segment_ids.add(containing)
-        if caption_segment_ids & physical_segment_ids:
-            masking.append(candidate)
-    return [*_dedupe_candidates(physical), *_dedupe_candidates(masking)]
+        if str(candidate.get("severity") or "") != "high":
+            continue
+        caption_text_mismatches.append(candidate)
+    return [*_dedupe_candidates(physical), *_dedupe_candidates(caption_text_mismatches)]
 
 
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

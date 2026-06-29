@@ -21,6 +21,7 @@ def build_quality_gate_report(
     visual_pacing_gate: dict[str, Any] | None = None,
     caption_alignment_gate: dict[str, Any] | None = None,
     final_timeline_quality_guard_gate: dict[str, Any] | None = None,
+    prewrite_projection_gate: dict[str, Any] | None = None,
     ready_for_user_manual_qc_preconditions_passed: bool = False,
 ) -> dict[str, Any]:
     missing = []
@@ -36,6 +37,8 @@ def build_quality_gate_report(
         missing.append("visual_pacing_gate")
     if caption_alignment_gate is None:
         missing.append("caption_alignment_gate")
+    if final_timeline_quality_guard_gate is None:
+        missing.append("final_timeline_quality_guard_gate")
     speed = _normalize_effective_speed_gate(
         effective_speed_gate
         or (contract_to_dict(EffectiveSpeedGateReport(gate_passed=False, blocker_codes=["V21_QUALITY_GATE_MISSING_REQUIRED_GATE"])))
@@ -70,12 +73,26 @@ def build_quality_gate_report(
         blocker_codes.extend(str(code) for code in final_caption_visible_repeat_gate.get("blocker_codes") or [])
     else:
         blocker_codes.append("V21_FINAL_CAPTION_VISIBLE_REPEAT_GATE_MISSING")
-    final_timeline_quality_passed = True
+    final_timeline_quality_passed = False
     if isinstance(final_timeline_quality_guard_gate, dict):
         final_timeline_quality_passed = bool(final_timeline_quality_guard_gate.get("gate_passed"))
         blocker_codes.extend(str(code) for code in final_timeline_quality_guard_gate.get("blocker_codes") or [])
         if not final_timeline_quality_passed:
             blocker_codes.append("V21_FINAL_TIMELINE_QUALITY_GUARD_FAILED")
+    else:
+        blocker_codes.append("V21_FINAL_TIMELINE_QUALITY_GUARD_MISSING")
+    prewrite_projection_passed = True
+    if isinstance(prewrite_projection_gate, dict):
+        prewrite_projection_passed = bool(
+            prewrite_projection_gate.get(
+                "prewrite_projected_write_view_gate_passed",
+                prewrite_projection_gate.get("gate_passed"),
+            )
+        )
+        projection_blocker_codes = prewrite_projection_gate.get("prewrite_projected_write_view_blocker_codes") or []
+        blocker_codes.extend(str(code) for code in projection_blocker_codes)
+        if not prewrite_projection_passed:
+            blocker_codes.append("V21_PREWRITE_PROJECTED_WRITE_VIEW_FAILED")
     if semantic_adjudication_gate is not None:
         blocker_codes.extend(str(code) for code in semantic.get("blocker_codes") or [])
         if not bool(semantic.get("semantic_adjudication_gate_passed")):
@@ -155,7 +172,14 @@ def build_quality_gate_report(
         else False
     )
     semantic_passed = bool(semantic.get("semantic_adjudication_gate_passed"))
-    gate_passed = core_gate_passed and caption_repeat_passed and semantic_passed and final_timeline_quality_passed and not blocker_codes
+    gate_passed = (
+        core_gate_passed
+        and caption_repeat_passed
+        and semantic_passed
+        and final_timeline_quality_passed
+        and prewrite_projection_passed
+        and not blocker_codes
+    )
     payload = contract_to_dict(
         QualityGateReport(
             gate_passed=gate_passed,
@@ -205,10 +229,25 @@ def build_quality_gate_report(
             "final_caption_visible_repeat_gate_present": final_caption_visible_repeat_gate is not None,
             "final_timeline_quality_guard_gate_present": final_timeline_quality_guard_gate is not None,
             "final_timeline_quality_guard_gate_passed": final_timeline_quality_passed,
+            "prewrite_projected_write_view_gate_present": prewrite_projection_gate is not None,
+            "prewrite_projected_write_view_gate_passed": prewrite_projection_passed,
             "missing_required_gates": missing,
             "post_write_actual_draft_audit_required_on_commit": True,
         }
     )
+    if isinstance(prewrite_projection_gate, dict):
+        payload["prewrite_projected_write_view_gate"] = {
+            key: prewrite_projection_gate[key]
+            for key in (
+                "prewrite_projected_write_view_applied",
+                "prewrite_projected_write_view_gate_passed",
+                "prewrite_projection_video_write_plan_gapless",
+                "prewrite_projection_error_code",
+                "prewrite_projection_error_message",
+                "prewrite_projected_write_view_blocker_codes",
+            )
+            if key in prewrite_projection_gate
+        }
     if isinstance(final_timeline_quality_guard_gate, dict):
         payload["final_timeline_quality_guard_gate"] = {
             key: final_timeline_quality_guard_gate[key]

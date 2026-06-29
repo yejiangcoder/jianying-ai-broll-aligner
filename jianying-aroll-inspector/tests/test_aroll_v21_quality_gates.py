@@ -23,6 +23,7 @@ from aroll_v21.quality.visual_pacing import VisualPacingNormalizer, build_visual
 from aroll_v21.quality.visual_pacing.intra_segment_gap import split_large_intra_segment_gaps
 from aroll_v21.render.subtitle_renderer import SubtitleRenderer, _cleanup_caption_units
 from aroll_v21.validate import ReadOnlyValidators
+from aroll_v21.validate.projected_write_view import ProjectedWriteViewError
 from aroll_v21.writeback import real_draft_writeback as real_writeback_module
 from aroll_v21.writeback.dynamic_source_binding_preflight import DynamicSourceBindingPreflight
 from aroll_v21.writeback.real_draft_writeback import RealDraftWriteback
@@ -78,6 +79,16 @@ def _semantic_gate_ok() -> dict[str, object]:
 
 def _final_visible_gate_ok() -> dict[str, object]:
     return {"gate_passed": True, "blocker_codes": []}
+
+
+def _final_timeline_guard_ok() -> dict[str, object]:
+    return {
+        "gate_passed": True,
+        "write_gate_passed": True,
+        "quality_guard_passed": True,
+        "blocker_codes": [],
+        "blocking_candidate_count": 0,
+    }
 
 
 def _multi_caption_fake_result(*, root: Path | None = None) -> RealDraftIngestResult:
@@ -663,6 +674,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
             effective_speed_gate={"gate_passed": True, "blocker_codes": []},
             final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "detector_report_present": True},
             final_caption_visible_repeat_gate=caption_gate,
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             semantic_adjudication_gate=_semantic_gate_ok(),
             visual_pacing_gate={"gate_passed": True, "visual_pacing_executed": True, "visual_merge_safety_gate_passed": True, "blocker_codes": []},
             caption_alignment_gate={"gate_passed": True, "caption_gui_track_gate_passed": True, "subtitle_readability_gate_passed": True, "blocker_codes": []},
@@ -3912,6 +3924,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
                 "detector_report_present": True,
             },
             final_caption_visible_repeat_gate=caption_gate,
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "blocker_codes": [],
@@ -3944,6 +3957,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
             effective_speed_gate={"gate_passed": True, "blocker_codes": []},
             final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "final_repeat_high_count_after": 0},
             final_caption_visible_repeat_gate=caption_gate,
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "blocker_codes": [],
@@ -5092,6 +5106,68 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertEqual(report["caption_alignment_gate"]["caption_too_short_count"], 0)
         self.assertNotIn("V21_CAPTION_TOO_SHORT", report["caption_alignment_gate"]["blocker_codes"])
 
+    def test_prewrite_projection_failure_blocks_validator_report(self) -> None:
+        engine = ArollEngine()
+        graph = _graph_for_single_subtitle_words([("w001", "正常内容", 0, 1_500_000)])
+        segment = FinalTimelineSegment(
+            segment_id="v21_seg_000001",
+            source_material_id="main",
+            source_segment_id="primary_window",
+            source_start_us=0,
+            source_end_us=1_500_000,
+            target_start_us=0,
+            target_end_us=1_500_000,
+            word_ids=["w001"],
+            text="正常内容",
+            decision_ids=[],
+        )
+        caption = CaptionRenderUnit(
+            caption_id="v21_cap_000001",
+            timeline_segment_ids=["v21_seg_000001"],
+            word_ids=["w001"],
+            text="正常内容",
+            target_start_us=0,
+            target_end_us=1_500_000,
+            source_subtitle_uids=["s001"],
+            style_template_id="canonical_caption_template",
+            containing_video_segment_id="v21_seg_000001",
+        )
+        material_write_plan, writer_blockers = engine.writer.build_write_plan(graph, [caption])
+        self.assertFalse(writer_blockers)
+
+        visual_pacing_report = {
+            "visual_pacing_executed": True,
+            "visual_pacing_merged_count": 0,
+            "visual_pacing_blocker_codes": [],
+            "visual_merge_safety_report": {
+                "gate_passed": True,
+                "blocker_codes": [],
+                "unsafe_merge_group_count": 0,
+                "dropped_content_reintroduced_count": 0,
+            },
+        }
+        with patch(
+            "aroll_v21.validate.validators.build_projected_write_view",
+            side_effect=ProjectedWriteViewError("TEST_PROJECTION_FAILED", "projection failed"),
+        ):
+            report = ReadOnlyValidators().run(
+                source_graph=graph,
+                decision_plan=DecisionPlan(decisions=[]),
+                final_timeline=[segment],
+                captions=[caption],
+                material_write_plan=material_write_plan,
+                visual_pacing_report=visual_pacing_report,
+                postwrite_mode="simulated",
+            )
+
+        projection = report["prewrite_projected_write_view"]
+        self.assertFalse(report["validator_report_ok"])
+        self.assertFalse(projection["prewrite_projected_write_view_gate_passed"])
+        self.assertEqual(projection["prewrite_projection_error_code"], "TEST_PROJECTION_FAILED")
+        self.assertIn("V21_PREWRITE_PROJECTED_WRITE_VIEW_FAILED", projection["prewrite_projected_write_view_blocker_codes"])
+        self.assertFalse(report["quality_gate_report"]["gate_passed"])
+        self.assertIn("V21_PREWRITE_PROJECTED_WRITE_VIEW_FAILED", report["quality_gate_report"]["blocker_codes"])
+
     def test_caption_gui_gate_blocks_orphan_or_floating_captions(self) -> None:
         orphan = CaptionRenderUnit(
             caption_id="v21_cap_orphan",
@@ -5190,10 +5266,13 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertFalse(quality["gate_passed"])
         self.assertFalse(quality["effective_speed_gate_present"])
         self.assertFalse(quality["final_caption_visible_repeat_gate_present"])
+        self.assertFalse(quality["final_timeline_quality_guard_gate_present"])
         self.assertFalse(quality["semantic_adjudication_gate_present"])
         self.assertFalse(quality["visual_pacing_gate_present"])
         self.assertIn("final_caption_visible_repeat_gate", quality["missing_required_gates"])
+        self.assertIn("final_timeline_quality_guard_gate", quality["missing_required_gates"])
         self.assertIn("V21_FINAL_CAPTION_VISIBLE_REPEAT_GATE_MISSING", quality["blocker_codes"])
+        self.assertIn("V21_FINAL_TIMELINE_QUALITY_GUARD_MISSING", quality["blocker_codes"])
         self.assertIn("V21_QUALITY_GATE_MISSING_REQUIRED_GATE", quality["blocker_codes"])
 
     def test_quality_gate_missing_final_visible_repeat_gate_fail_closed(self) -> None:
@@ -5215,6 +5294,34 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertFalse(quality["final_caption_visible_repeat_gate_present"])
         self.assertIn("final_caption_visible_repeat_gate", quality["missing_required_gates"])
         self.assertIn("V21_FINAL_CAPTION_VISIBLE_REPEAT_GATE_MISSING", quality["blocker_codes"])
+
+    def test_quality_gate_missing_final_timeline_guard_fail_closed(self) -> None:
+        quality = build_quality_gate_report(
+            effective_speed_gate={"gate_passed": True, "blocker_codes": []},
+            final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "final_repeat_high_count_after": 0},
+            final_caption_visible_repeat_gate={"gate_passed": True, "blocker_codes": []},
+            semantic_adjudication_gate=_semantic_gate_ok(),
+            visual_pacing_gate={
+                "gate_passed": True,
+                "blocker_codes": [],
+                "visual_pacing_executed": True,
+                "visual_merge_safety_gate_passed": True,
+            },
+            caption_alignment_gate={
+                "gate_passed": True,
+                "blocker_codes": [],
+                "caption_gui_track_gate_passed": True,
+                "subtitle_readability_gate_passed": True,
+            },
+            ready_for_user_manual_qc_preconditions_passed=True,
+        )
+
+        self.assertFalse(quality["gate_passed"])
+        self.assertFalse(quality["ready_for_user_manual_qc_preconditions_passed"])
+        self.assertFalse(quality["final_timeline_quality_guard_gate_present"])
+        self.assertFalse(quality["final_timeline_quality_guard_gate_passed"])
+        self.assertIn("final_timeline_quality_guard_gate", quality["missing_required_gates"])
+        self.assertIn("V21_FINAL_TIMELINE_QUALITY_GUARD_MISSING", quality["blocker_codes"])
 
     def test_final_caption_visible_gate_reports_policy_and_repair_signal_layers(self) -> None:
         gate = build_final_caption_visible_repeat_gate(
@@ -5241,6 +5348,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
             effective_speed_gate={"gate_passed": True, "blocker_codes": []},
             final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "final_repeat_high_count_after": 0},
             final_caption_visible_repeat_gate=_final_visible_gate_ok(),
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "blocker_codes": [],
@@ -5284,6 +5392,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
             },
             final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "final_repeat_high_count_after": 0},
             final_caption_visible_repeat_gate=_final_visible_gate_ok(),
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "blocker_codes": [],
@@ -5320,6 +5429,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
             effective_speed_gate={"gate_passed": True, "blocker_codes": [], "prewrite_pending": True},
             final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "final_repeat_high_count_after": 0},
             final_caption_visible_repeat_gate=_final_visible_gate_ok(),
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "blocker_codes": [],
@@ -5395,6 +5505,7 @@ class ArollV21QualityGateTests(unittest.TestCase):
                 "clusters_per_dropped_segment": {"4": ["a", "b"]},
             },
             final_caption_visible_repeat_gate=_final_visible_gate_ok(),
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
             visual_pacing_gate={
                 "gate_passed": True,
                 "visual_pacing_executed": True,

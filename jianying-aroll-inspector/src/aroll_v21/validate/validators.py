@@ -21,6 +21,19 @@ from aroll_v21.validate.projected_write_view import ProjectedWriteViewError, bui
 from aroll_v21.validate.rough_cut_quality import build_rough_cut_quality_metrics
 
 
+PREWRITE_PROJECTED_WRITE_VIEW_BLOCKER_CODE = "V21_PREWRITE_PROJECTED_WRITE_VIEW_FAILED"
+
+
+def _with_prewrite_projection_gate(report: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(report)
+    applied = bool(payload.get("prewrite_projected_write_view_applied"))
+    gapless = bool(payload.get("prewrite_projection_video_write_plan_gapless")) if applied else False
+    passed = bool(applied and gapless and not payload.get("prewrite_projection_error_code"))
+    payload["prewrite_projected_write_view_gate_passed"] = passed
+    payload["prewrite_projected_write_view_blocker_codes"] = [] if passed else [PREWRITE_PROJECTED_WRITE_VIEW_BLOCKER_CODE]
+    return payload
+
+
 def _caption_rows(captions: list[CaptionRenderUnit]) -> list[dict[str, Any]]:
     return [
         {
@@ -92,7 +105,9 @@ class ReadOnlyValidators:
         projected_final_timeline = final_timeline
         projected_captions = captions
         projected_material_write_plan = material_write_plan
-        prewrite_projection_report: dict[str, Any] = {"prewrite_projected_write_view_applied": False}
+        prewrite_projection_report: dict[str, Any] = _with_prewrite_projection_gate(
+            {"prewrite_projected_write_view_applied": False}
+        )
         try:
             projected_view = build_projected_write_view(
                 source_graph=source_graph,
@@ -104,20 +119,24 @@ class ReadOnlyValidators:
             projected_final_timeline = projected_view.final_timeline
             projected_captions = projected_view.captions
             projected_material_write_plan = projected_view.material_write_plan
-            prewrite_projection_report = dict(projected_view.report)
+            prewrite_projection_report = _with_prewrite_projection_gate(dict(projected_view.report))
         except ProjectedWriteViewError as exc:
-            prewrite_projection_report = {
-                "prewrite_projected_write_view_applied": False,
-                "prewrite_projection_error_code": exc.code,
-                "prewrite_projection_error_message": exc.message,
-                "prewrite_projection_error_context": exc.context,
-            }
+            prewrite_projection_report = _with_prewrite_projection_gate(
+                {
+                    "prewrite_projected_write_view_applied": False,
+                    "prewrite_projection_error_code": exc.code,
+                    "prewrite_projection_error_message": exc.message,
+                    "prewrite_projection_error_context": exc.context,
+                }
+            )
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-            prewrite_projection_report = {
-                "prewrite_projected_write_view_applied": False,
-                "prewrite_projection_error_code": type(exc).__name__,
-                "prewrite_projection_error_message": str(exc),
-            }
+            prewrite_projection_report = _with_prewrite_projection_gate(
+                {
+                    "prewrite_projected_write_view_applied": False,
+                    "prewrite_projection_error_code": type(exc).__name__,
+                    "prewrite_projection_error_message": str(exc),
+                }
+            )
         residual_audit = {"issues": []}
         final_repeat = build_final_repeat_gate_report(residual_audit, caption_rows)
         final_repeat = self._final_repeat_semantic_status(final_repeat, decision_plan)
@@ -179,6 +198,7 @@ class ReadOnlyValidators:
                 final_caption_visible_repeat.get("gate_passed"),
                 caption_alignment.get("gate_passed"),
                 final_timeline_quality_guard.get("gate_passed"),
+                prewrite_projection_report.get("prewrite_projected_write_view_gate_passed"),
                 read_only_ok,
             ]
         )
@@ -190,6 +210,7 @@ class ReadOnlyValidators:
             visual_pacing_gate=visual_pacing,
             caption_alignment_gate=caption_alignment,
             final_timeline_quality_guard_gate=final_timeline_quality_guard,
+            prewrite_projection_gate=prewrite_projection_report,
             ready_for_user_manual_qc_preconditions_passed=base_ok,
         )
         ok = bool(base_ok and quality_gate.get("gate_passed"))
