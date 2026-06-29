@@ -122,3 +122,61 @@ def test_renderer_cleanup_preserves_final_timeline_caption_word_coverage() -> No
     assert report["prewrite_uncaptioned_spoken_word_count"] == 0
     assert report["missing_final_timeline_caption_word_count"] == 0
     assert "V21_FINAL_TIMELINE_CAPTION_WORD_COVERAGE_FAILED" not in report["blocker_codes"]
+
+
+def test_renderer_rebalances_ascii_label_before_open_predicate_caption() -> None:
+    words = [
+        CanonicalWord(f"w{index:02d}", text, text, start, end, "video", "src", uid, subtitle_index, None, None, 1.0, True, True)
+        for index, (text, start, end, uid, subtitle_index) in enumerate(
+            [
+                ("从来", 0, 280_000, "s1", 1),
+                ("不是", 280_000, 560_000, "s1", 1),
+                ("为", 560_000, 680_000, "s1", 1),
+                ("了", 680_000, 760_000, "s1", 1),
+                ("乞求", 800_000, 1_080_000, "s1", 1),
+                ("被", 1_080_000, 1_260_000, "s1", 1),
+                ("爱", 1_260_000, 1_600_000, "s1", 1),
+                ("Pro", 1_660_000, 1_820_000, "s1", 1),
+                ("是", 2_180_000, 2_460_000, "s2", 2),
+                ("为", 2_460_000, 2_580_000, "s2", 2),
+                ("了", 2_580_000, 2_900_000, "s2", 2),
+                ("Pro", 3_200_000, 3_360_000, "s3", 3),
+                ("阶段", 3_480_000, 3_720_000, "s3", 3),
+                ("已经", 3_860_000, 4_140_000, "s3", 3),
+                ("开", 4_140_000, 4_580_000, "s3", 3),
+            ],
+            start=1,
+        )
+    ]
+    graph = CanonicalSourceGraph(
+        words=words,
+        edit_units=[],
+        subtitle_rows=[],
+        source_materials=[],
+        source_segments=[],
+        text_materials=[],
+        text_segments=[],
+        invariant_report=SourceGraphInvariantReport(
+            single_source_graph_ok=True,
+            all_words_have_source_time=True,
+            all_edit_units_have_word_ids=True,
+            unbound_word_count=0,
+            unbound_subtitle_count=0,
+            blocker_count=0,
+        ),
+    )
+    timeline = [
+        FinalTimelineSegment("v21_seg_000001", "video", "src", 0, 1_820_000, 0, 1_820_000, [f"w{i:02d}" for i in range(1, 9)], "从来不是为了乞求被爱Pro", []),
+        FinalTimelineSegment("v21_seg_000002", "video", "src", 2_180_000, 2_900_000, 1_820_000, 2_540_000, [f"w{i:02d}" for i in range(9, 12)], "是为了", []),
+        FinalTimelineSegment("v21_seg_000003", "video", "src", 3_200_000, 4_580_000, 2_540_000, 3_920_000, [f"w{i:02d}" for i in range(12, 16)], "Pro阶段已经开", []),
+    ]
+
+    captions = SubtitleRenderer().render(timeline, graph)
+    report = build_caption_alignment_report(final_timeline=timeline, captions=captions)
+
+    assert [caption.text for caption in captions[:3]] == ["从来不是为了乞求被爱", "Pro是为了", "Pro阶段已经开"]
+    assert captions[1].word_ids == ["w08", "w09", "w10", "w11"]
+    assert captions[1].timeline_segment_ids == ["v21_seg_000001", "v21_seg_000002"]
+    assert report["gate_passed"] is True
+    assert report["prewrite_uncaptioned_spoken_word_count"] == 0
+    assert report["missing_final_timeline_caption_word_count"] == 0

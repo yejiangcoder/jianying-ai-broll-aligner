@@ -4,6 +4,7 @@ import unittest
 
 from aroll_v21 import ArollEngine
 from aroll_v21.ir import DecisionPlan
+from aroll_v21.validate.validators import ReadOnlyValidators
 
 
 class ArollV21FinalRepeatValidatorPayloadConsistencyTests(unittest.TestCase):
@@ -68,6 +69,43 @@ class ArollV21FinalRepeatValidatorPayloadConsistencyTests(unittest.TestCase):
         self.assertNotIn(
             "INTERNAL_SEMANTIC_REQUEST_MISSING_FOR_FINAL_REPEAT_VALIDATOR",
             [blocker.code for blocker in blockers],
+        )
+
+    def test_protected_final_target_bridge_trace_accepts_validator_candidate_when_cluster_id_drifts(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        plan.decision_trace.append(
+            {
+                "route": "final_target_repeat",
+                "cluster_id": "final_target_repeat_tc_0003",
+                "decision": "keep_all_protected_semantic_bridge",
+                "left_text": "你必须具备超越",
+                "right_text": "必须具备",
+                "applied": True,
+            }
+        )
+        repeat_report = {
+            "final_repeat_gate_passed": False,
+            "final_target_repeat_candidates": [
+                {
+                    "cluster_id": "tc_0001",
+                    "cluster_type": "semantic_containment_take",
+                    "confidence": "medium",
+                    "items": [
+                        {"subtitle_index": 56, "text": "你必须具备超越"},
+                        {"subtitle_index": 60, "text": "必须具备"},
+                    ],
+                }
+            ],
+        }
+
+        updated = ReadOnlyValidators()._final_repeat_semantic_status(repeat_report, plan)
+
+        self.assertTrue(updated["final_repeat_gate_passed"])
+        self.assertEqual(updated["final_target_repeat_accepted_count"], 1)
+        self.assertEqual(updated["final_target_repeat_medium_count"], 0)
+        self.assertEqual(
+            updated["final_target_repeat_candidates"][0]["v21_resolution"],
+            "accepted_by_protected_semantic_bridge",
         )
 
 

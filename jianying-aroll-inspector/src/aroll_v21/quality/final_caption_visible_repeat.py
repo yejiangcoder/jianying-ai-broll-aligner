@@ -18,6 +18,7 @@ from aroll_v21.quality.final_caption_visible import (
 from aroll_v21.quality.final_semantic_integrity import build_final_semantic_integrity_candidates
 from aroll_v21.quality.boundary_overlap import (
     is_explanatory_term_reuse,
+    is_parallel_progressive_semantic_expansion,
     is_semantic_label_reuse_boundary,
 )
 from aroll_v21.quality.repeat_span_repair import longest_suffix_prefix_overlap, self_repair_aborted_phrase_candidate
@@ -612,6 +613,8 @@ def _restart_repeat_visible_candidates(captions: list[CaptionRenderUnit]) -> lis
                     overlap_text = overlap
             if not overlap_text:
                 continue
+            if is_parallel_progressive_semantic_expansion(left_text, combined, overlap_text):
+                continue
             key = (caption.caption_id, tuple(row.caption_id for row in window), overlap_text)
             if key in emitted:
                 continue
@@ -724,6 +727,8 @@ def _short_fragment_restart_candidates(captions: list[CaptionRenderUnit]) -> lis
             if row is None:
                 continue
             overlap_text = str(row.get("overlap_text") or "")
+            if is_parallel_progressive_semantic_expansion(left_text, combined, overlap_text):
+                continue
             key = (caption.caption_id, overlap_text)
             if key in emitted:
                 continue

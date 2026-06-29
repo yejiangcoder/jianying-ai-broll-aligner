@@ -691,6 +691,33 @@ class ArollV21QualityGateTests(unittest.TestCase):
             ["drop_bad_fragment", "trim_repeated_prefix", "keep_if_coherent", "requires_human_review"],
         )
 
+    def test_quality_gate_report_keeps_final_visible_semantic_arbitration_payloads(self) -> None:
+        caption_gate = build_final_caption_visible_repeat_gate(
+            [
+                _caption(1, "v21_seg_000001", 0, 1_600_000, text="他的购物车全是投资和享受"),
+                _caption(2, "v21_seg_000002", 1_620_000, 2_300_000, text="你的购物车"),
+            ]
+        )
+        quality = build_quality_gate_report(
+            effective_speed_gate={"gate_passed": True, "blocker_codes": []},
+            final_repeat_convergence_gate={"gate_passed": True, "blocker_codes": [], "detector_report_present": True},
+            final_caption_visible_repeat_gate=caption_gate,
+            final_timeline_quality_guard_gate=_final_timeline_guard_ok(),
+            semantic_adjudication_gate=_semantic_gate_ok(),
+            visual_pacing_gate={"gate_passed": True, "visual_pacing_executed": True, "visual_merge_safety_gate_passed": True, "blocker_codes": []},
+            caption_alignment_gate={"gate_passed": True, "caption_gui_track_gate_passed": True, "subtitle_readability_gate_passed": True, "blocker_codes": []},
+            ready_for_user_manual_qc_preconditions_passed=True,
+        )
+
+        visible = quality["final_caption_visible_repeat_gate"]
+        self.assertTrue(quality["gate_passed"])
+        self.assertEqual(visible["repeat_semantic_arbitration_candidate_count"], 1)
+        self.assertEqual(visible["repeat_semantic_arbitration_request_count"], 1)
+        self.assertEqual(
+            visible["repeat_semantic_arbitration_request_payloads"][0]["local_context"]["semantic_repeat_evidence"]["shared_text"],
+            "的购物车",
+        )
+
     def test_final_visible_detects_cross_caption_semantic_containment_window(self) -> None:
         gate = build_final_caption_visible_repeat_gate(
             [
@@ -1305,6 +1332,94 @@ class ArollV21QualityGateTests(unittest.TestCase):
         self.assertTrue(result.report["final_visible_repair_success"], result.report)
         self.assertEqual([segment.text for segment in result.final_timeline], ["但凡任何一个普通人", "但凡给你一点反馈"])
         self.assertEqual([caption.text for caption in result.captions], ["但凡任何一个普通人", "但凡给你一点反馈"])
+
+    def test_final_visible_repair_keeps_progressive_semantic_expansion(self) -> None:
+        rows = [
+            ("w001", "你", 0, 160_000),
+            ("w002", "更", 160_000, 320_000),
+            ("w003", "没钱", 320_000, 640_000),
+            ("w004", "去", 640_000, 840_000),
+            ("w005", "健身", 840_000, 1_120_000),
+            ("w006", "了", 1_120_000, 1_360_000),
+            ("w007", "也", 1_360_000, 1_560_000),
+            ("w008", "没钱", 1_560_000, 1_840_000),
+            ("w009", "去", 1_840_000, 2_000_000),
+            ("w010", "做", 2_000_000, 2_120_000),
+            ("w011", "YM", 2_120_000, 2_480_000),
+            ("w012", "了", 2_480_000, 2_680_000),
+            ("w013", "也", 2_680_000, 2_880_000),
+            ("w014", "没钱", 2_880_000, 3_160_000),
+            ("w015", "去", 3_160_000, 3_320_000),
+            ("w016", "投资", 3_320_000, 3_600_000),
+            ("w017", "自己", 3_600_000, 3_840_000),
+            ("w018", "了", 3_840_000, 4_120_000),
+            ("w019", "你", 4_120_000, 4_320_000),
+            ("w020", "变得", 4_320_000, 4_520_000),
+            ("w021", "更", 4_520_000, 4_680_000),
+            ("w022", "丑", 4_680_000, 4_920_000),
+            ("w023", "了", 4_920_000, 5_240_000),
+            ("w024", "哈", 5_240_000, 5_480_000),
+            ("w025", "你", 5_480_000, 5_680_000),
+            ("w026", "更", 5_680_000, 5_880_000),
+            ("w027", "没有", 5_880_000, 6_120_000),
+            ("w028", "认识", 6_120_000, 6_400_000),
+            ("w029", "你", 6_400_000, 6_600_000),
+            ("w030", "更", 6_600_000, 6_800_000),
+            ("w031", "没有", 6_800_000, 7_200_000),
+            ("w032", "你", 7_200_000, 7_440_000),
+            ("w033", "变得", 7_440_000, 7_720_000),
+            ("w034", "你", 7_720_000, 7_880_000),
+            ("w035", "更", 7_880_000, 8_040_000),
+            ("w036", "没有", 8_040_000, 8_280_000),
+            ("w037", "认识", 8_280_000, 8_480_000),
+            ("w038", "异性", 8_480_000, 8_720_000),
+            ("w039", "的", 8_720_000, 8_920_000),
+            ("w040", "渠道", 8_920_000, 9_160_000),
+            ("w041", "了", 9_160_000, 9_500_000),
+            ("w042", "就", 9_500_000, 9_620_000),
+            ("w043", "变得", 9_620_000, 9_820_000),
+            ("w044", "更", 9_820_000, 10_020_000),
+            ("w045", "压抑", 10_020_000, 10_500_000),
+        ]
+        source_graph = _graph_for_single_subtitle_words(rows)
+        renderer = SubtitleRenderer()
+        segment_specs = [
+            ("你更没钱去健身了", ["w001", "w002", "w003", "w004", "w005", "w006"]),
+            ("也没钱去做YM了", ["w007", "w008", "w009", "w010", "w011", "w012"]),
+            ("也没钱去投资自己了", ["w013", "w014", "w015", "w016", "w017", "w018"]),
+            ("你变得更丑了", ["w019", "w020", "w021", "w022", "w023"]),
+            ("哈你更没有认识", ["w024", "w025", "w026", "w027", "w028"]),
+            ("你更没有你变得", ["w029", "w030", "w031", "w032", "w033"]),
+            ("你更没有认识异性的渠道了", ["w034", "w035", "w036", "w037", "w038", "w039", "w040", "w041"]),
+            ("就变得更压抑", ["w042", "w043", "w044", "w045"]),
+        ]
+        word_times = {word_id: (start, end) for word_id, _text, start, end in rows}
+        timeline = [
+            replace(
+                _segment(index, word_times[word_ids[0]][0], word_times[word_ids[-1]][1]),
+                source_material_id="main",
+                source_segment_id="primary_window",
+                source_start_us=word_times[word_ids[0]][0],
+                source_end_us=word_times[word_ids[-1]][1],
+                target_start_us=word_times[word_ids[0]][0],
+                target_end_us=word_times[word_ids[-1]][1],
+                word_ids=word_ids,
+                text=text,
+            )
+            for index, (text, word_ids) in enumerate(segment_specs, start=1)
+        ]
+        captions = renderer.render(timeline, source_graph)
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=captions,
+            source_graph=source_graph,
+            render_captions=lambda repaired: renderer.render(repaired, source_graph),
+        )
+
+        self.assertTrue(result.report["final_visible_repair_success"], result.report)
+        self.assertEqual([segment.text for segment in result.final_timeline], [text for text, _word_ids in segment_specs])
+        self.assertEqual([caption.text for caption in result.captions], [text for text, _word_ids in segment_specs])
 
     def test_final_visible_repair_keeps_parallel_condition_after_aborted_condition_opener(self) -> None:
         rows = [

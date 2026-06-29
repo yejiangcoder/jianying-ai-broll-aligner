@@ -286,6 +286,40 @@ def test_repeated_island_low_confidence_allow() -> None:
     assert build_repeated_island_proposals(timeline, graph) == []
 
 
+def test_repeated_island_repairs_leading_discourse_particle_restart() -> None:
+    graph = _graph_for_tokens(["还", "那", "还", "说", "个", "der"])
+    timeline = [_single_segment(graph)]
+    renderer = SubtitleRenderer()
+
+    proposals = build_repeated_island_proposals(timeline, graph)
+
+    assert len(proposals) == 1
+    assert proposals[0].target_word_ids == ["w001"]
+    assert proposals[0].target_text == "还"
+    assert proposals[0].evidence["confidence"] == "high"
+
+    result = repair_final_visible_caption_issues(
+        final_timeline=timeline,
+        captions=renderer.render(timeline, graph),
+        source_graph=graph,
+        render_captions=lambda rows: renderer.render(rows, graph),
+    )
+
+    assert "".join(segment.text for segment in result.final_timeline) == "那还说个der"
+    actions = [action for action in result.report["final_visible_repair_actions"] if action["issue_type"] == "repeated_island"]
+    assert actions[0]["target_word_ids"] == ["w001"]
+
+
+def test_repeated_island_single_char_topic_reuse_stays_low_confidence() -> None:
+    graph = _graph_for_tokens(["人", "和", "人", "对话"])
+    timeline = [_single_segment(graph)]
+
+    candidates = detect_repeated_island_candidates(timeline, graph)
+
+    assert any(candidate.confidence == "low" for candidate in candidates)
+    assert build_repeated_island_proposals(timeline, graph) == []
+
+
 def test_repeated_island_a_not_a_structure_not_repaired() -> None:
     graph = _graph_for_tokens(["去", "不", "去", "看", "看"])
     timeline = [_single_segment(graph)]

@@ -108,6 +108,40 @@ class ArollV21QcRound0626Regressions(unittest.TestCase):
         self.assertIsNone(compiler_repeated_suffix_start(object(), tokens))
         self.assertEqual(visual_repeated_suffix_start(["重复", "短语", "中间", "重复", "短语"]), 3)
 
+    def test_repeated_suffix_cleanup_keeps_boundary_subject_before_predicate(self) -> None:
+        tokens = ["女", "女人", "就", "永远", "是", "薛定", "女人"]
+
+        self.assertIsNone(visual_repeated_suffix_start(tokens, next_token="就"))
+        self.assertIsNone(compiler_repeated_suffix_start(object(), tokens, next_token="就"))
+        self.assertEqual(visual_repeated_suffix_start(tokens), 6)
+        self.assertEqual(compiler_repeated_suffix_start(object(), tokens), 6)
+
+    def test_repeated_suffix_cleanup_uses_next_segment_predicate_start(self) -> None:
+        words = [
+            _word(1, "女", 0, 240_000, 53),
+            _word(2, "女人", 600_000, 1_080_000, 53),
+            _word(3, "就", 1_160_000, 1_400_000, 53),
+            _word(4, "永远", 1_400_000, 1_680_000, 53),
+            _word(5, "是", 1_680_000, 1_960_000, 53),
+            _word(6, "薛定", 2_200_000, 2_520_000, 53),
+            _word(7, "女人", 3_100_000, 3_580_000, 53),
+            _word(8, "就", 3_580_000, 3_780_000, 54),
+            _word(9, "永远", 3_780_000, 4_000_000, 54),
+            _word(10, "是", 4_000_000, 4_240_000, 54),
+        ]
+        source_graph = _graph(words)
+        segments = [
+            _segment(1, "女女人就永远是薛定女人", 0, 3_580_000, [word.word_id for word in words[:7]]),
+            _segment(2, "就永远是", 3_580_000, 4_240_000, [word.word_id for word in words[7:]]),
+        ]
+        plan = DecisionPlan(decisions=[])
+
+        cleaned, blockers = FinalTimelineCompiler()._final_repeated_island_suffix_cleanup(segments, source_graph, plan)
+
+        self.assertEqual(blockers, [])
+        self.assertEqual([segment.text for segment in cleaned], ["女女人就永远是薛定女人", "就永远是"])
+        self.assertFalse(any(row.get("route") == "hidden_audio_repeat" for row in plan.decision_trace))
+
     def test_final_target_repeat_keeps_segment_required_by_left_context(self) -> None:
         segments = [
             _segment(1, "男人只要进入", 0, 1_000_000, ["w_000001"]),

@@ -119,6 +119,106 @@ class ArollV21FinalTargetRepeatResolverTests(unittest.TestCase):
         self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, [])
         self.assertTrue(plan.write_allowed)
 
+    def test_keep_longest_does_not_drop_open_predicate_bridge(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        plan.semantic_request_payloads.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "issue_id": "final_target_repeat_tc_0001",
+                "type": "final_target_repeat",
+                "cluster_type": "semantic_containment_take",
+                "severity": "medium",
+                "provider_required": True,
+                "left_text": "你必须具备超越",
+                "right_text": "必须具备",
+                "candidates": [
+                    {"role": "left", "text": "你必须具备超越"},
+                    {"role": "right", "text": "必须具备"},
+                ],
+            }
+        )
+        plan.final_target_repeat_unresolved_cluster_ids.append("final_target_repeat_tc_0001")
+        plan.semantic_decision_rows.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "decision": "keep_longest_drop_others",
+                "reason": "provider incorrectly treated the shared predicate as a removable duplicate",
+                "confidence": 0.95,
+                "requires_human_review": False,
+            }
+        )
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [
+                segment(1, "你必须具备超越", start_us=0),
+                segment(2, "你的眉骨", start_us=2_000_000),
+                segment(3, "必须具备", start_us=2_360_000),
+                segment(4, "明显的骨骼高低差", start_us=2_800_000),
+            ],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual(
+            [row.text for row in final_timeline],
+            ["你必须具备超越", "你的眉骨", "必须具备", "明显的骨骼高低差"],
+        )
+        self.assertTrue(
+            any(row.get("decision") == "keep_all_protected_semantic_bridge" for row in plan.decision_trace),
+            plan.decision_trace,
+        )
+        self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, [])
+
+    def test_provider_drop_right_does_not_drop_open_predicate_bridge(self) -> None:
+        plan = DecisionPlan(decisions=[])
+        plan.semantic_request_payloads.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "issue_id": "final_target_repeat_tc_0001",
+                "type": "final_target_repeat",
+                "cluster_type": "semantic_containment_take",
+                "severity": "medium",
+                "provider_required": True,
+                "left_text": "你必须具备超越",
+                "right_text": "必须具备",
+                "candidates": [
+                    {"role": "left", "text": "你必须具备超越"},
+                    {"role": "right", "text": "必须具备"},
+                ],
+            }
+        )
+        plan.final_target_repeat_unresolved_cluster_ids.append("final_target_repeat_tc_0001")
+        plan.semantic_decision_rows.append(
+            {
+                "cluster_id": "final_target_repeat_tc_0001",
+                "decision": "drop_right",
+                "reason": "provider incorrectly treated the shared predicate as a removable duplicate",
+                "confidence": 0.95,
+                "requires_human_review": False,
+            }
+        )
+
+        final_timeline, blockers = FinalTargetRepeatResolver().resolve(
+            [
+                segment(1, "你必须具备超越", start_us=0),
+                segment(2, "你的眉骨", start_us=2_000_000),
+                segment(3, "必须具备", start_us=2_360_000),
+                segment(4, "明显的骨骼高低差", start_us=2_800_000),
+            ],
+            plan,
+        )
+
+        self.assertEqual(blockers, [])
+        self.assertEqual(
+            [row.text for row in final_timeline],
+            ["你必须具备超越", "你的眉骨", "必须具备", "明显的骨骼高低差"],
+        )
+        trace = [row for row in plan.decision_trace if row.get("decision") == "keep_all_protected_semantic_bridge"]
+        self.assertTrue(trace, plan.decision_trace)
+        self.assertEqual(trace[-1]["attempted_decision"], "drop_right")
+        self.assertEqual(trace[-1]["text_pair"], ["你必须具备超越", "必须具备"])
+        self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, [])
+
     def test_same_cluster_id_provider_decision_is_ignored_when_text_pair_changed(self) -> None:
         plan = DecisionPlan(decisions=[])
         plan.semantic_request_payloads.append(

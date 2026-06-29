@@ -8,6 +8,7 @@ from aroll_text_normalize import normalize_text
 from aroll_v21.decision.deterministic_baseline_policy import DeterministicBaselinePolicy
 from aroll_v21.decision.semantic_decision_planner import FORBIDDEN_DEEPSEEK_FIELDS
 from aroll_v21.ir.models import Blocker, DecisionPlan, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import is_open_predicate_bridge
 
 
 FINAL_TARGET_REPEAT_DECISIONS = {
@@ -170,6 +171,34 @@ class FinalTargetRepeatResolver:
 
                 deterministic_semantic_drop_indices = self._deterministic_semantic_containment_drop_indices(cluster)
                 if deterministic_semantic_drop_indices:
+                    protected_reason = self._protected_semantic_drop_reason(
+                        deterministic_semantic_drop_indices,
+                        current,
+                    )
+                    if protected_reason:
+                        cluster_pair = self._cluster_text_pair(cluster)
+                        accepted_ids.add(cluster_id)
+                        unresolved_ids.discard(cluster_id)
+                        resolved_ids.add(cluster_id)
+                        decision_plan.decision_trace.append(
+                            {
+                                "route": "final_target_repeat",
+                                "cluster_id": cluster_id,
+                                "cluster_type": str(cluster.get("cluster_type") or ""),
+                                "stage": "final_timeline_pre_emit",
+                                "convergence_iteration": convergence_iteration + 1,
+                                "decision": "keep_all_protected_semantic_bridge",
+                                "dropped_segment_indices": deterministic_semantic_drop_indices,
+                                "left_text": cluster_pair[0] if cluster_pair else "",
+                                "right_text": cluster_pair[1] if cluster_pair else "",
+                                "text_pair": list(cluster_pair) if cluster_pair else [],
+                                "applied": True,
+                                "reason": protected_reason,
+                                "source": "local_policy",
+                                "decision_source": "local_policy",
+                            }
+                        )
+                        continue
                     for drop_index in deterministic_semantic_drop_indices:
                         if 1 <= drop_index <= len(current):
                             dropped_indices.add(drop_index - 1)
@@ -304,7 +333,85 @@ class FinalTargetRepeatResolver:
                         )
                     continue
 
+                if decision == "keep_longest_drop_others":
+                    semantic_drop_indices = self._drop_indices_for_decision(cluster, decision, row)
+                    protected_reason = self._protected_semantic_drop_reason(semantic_drop_indices, current)
+                    if protected_reason:
+                        cluster_pair = self._cluster_text_pair(cluster)
+                        accepted_ids.add(cluster_id)
+                        unresolved_ids.discard(cluster_id)
+                        resolved_ids.add(cluster_id)
+                        matched_request_id = str(row.get("_matched_request_cluster_id") or "")
+                        if matched_request_id:
+                            unresolved_ids.discard(matched_request_id)
+                            resolved_ids.add(matched_request_id)
+                        decision_plan.decision_trace.append(
+                            {
+                                "route": "final_target_repeat",
+                                "cluster_id": cluster_id,
+                                "convergence_iteration": convergence_iteration + 1,
+                                "decision": "keep_all_protected_semantic_bridge",
+                                "dropped_segment_indices": semantic_drop_indices,
+                                "left_text": cluster_pair[0] if cluster_pair else "",
+                                "right_text": cluster_pair[1] if cluster_pair else "",
+                                "text_pair": list(cluster_pair) if cluster_pair else [],
+                                "applied": True,
+                                "source": "SemanticDecisionsJson",
+                                "reason": protected_reason,
+                                "provider_reason": str(row.get("reason") or decision),
+                            }
+                        )
+                        continue
+                    materialization_blocker = self._keep_longest_materialization_blocker(cluster, cluster_id, current)
+                    if materialization_blocker is not None:
+                        if not self._has_blocker(decision_plan, materialization_blocker.code, cluster_id):
+                            decision_plan.blockers.append(materialization_blocker)
+                            blockers.append(materialization_blocker)
+                        unresolved_ids.add(cluster_id)
+                        self._append_semantic_request(decision_plan, cluster, cluster_id)
+                        decision_plan.decision_trace.append(
+                            {
+                                "route": "final_target_repeat",
+                                "cluster_id": cluster_id,
+                                "convergence_iteration": convergence_iteration + 1,
+                                "decision": decision,
+                                "applied": False,
+                                "source": "SemanticDecisionsJson",
+                                "blocked_by": materialization_blocker.code,
+                                "reason": str(row.get("reason") or decision),
+                            }
+                        )
+                        continue
+
                 semantic_drop_indices = self._drop_indices_for_decision(cluster, decision, row)
+                protected_reason = self._protected_semantic_drop_reason(semantic_drop_indices, current)
+                if protected_reason:
+                    cluster_pair = self._cluster_text_pair(cluster)
+                    accepted_ids.add(cluster_id)
+                    unresolved_ids.discard(cluster_id)
+                    resolved_ids.add(cluster_id)
+                    matched_request_id = str(row.get("_matched_request_cluster_id") or "")
+                    if matched_request_id:
+                        unresolved_ids.discard(matched_request_id)
+                        resolved_ids.add(matched_request_id)
+                    decision_plan.decision_trace.append(
+                        {
+                            "route": "final_target_repeat",
+                            "cluster_id": cluster_id,
+                            "convergence_iteration": convergence_iteration + 1,
+                            "decision": "keep_all_protected_semantic_bridge",
+                            "attempted_decision": decision,
+                            "dropped_segment_indices": semantic_drop_indices,
+                            "left_text": cluster_pair[0] if cluster_pair else "",
+                            "right_text": cluster_pair[1] if cluster_pair else "",
+                            "text_pair": list(cluster_pair) if cluster_pair else [],
+                            "applied": True,
+                            "source": "SemanticDecisionsJson",
+                            "reason": protected_reason,
+                            "provider_reason": str(row.get("reason") or decision),
+                        }
+                    )
+                    continue
                 for drop_index in semantic_drop_indices:
                     if 1 <= drop_index <= len(current):
                         dropped_indices.add(drop_index - 1)
@@ -893,6 +1000,92 @@ class FinalTargetRepeatResolver:
             keep = set(grouped_indices[longest_index])
             return [index for index in indices if index not in keep]
         return []
+
+    def _keep_longest_materialization_blocker(
+        self,
+        cluster: dict[str, Any],
+        cluster_id: str,
+        segments: list[FinalTimelineSegment],
+    ) -> Blocker | None:
+        kept_item = self._keep_longest_item(cluster)
+        if kept_item is None:
+            no_blocker: Blocker | None = None
+            return no_blocker
+        expected_text = normalize_text(self._item_decision_text(kept_item))
+        if not expected_text:
+            no_blocker: Blocker | None = None
+            return no_blocker
+        timeline_text = normalize_text("".join(str(segment.text or "") for segment in segments))
+        kept_indices = self._item_drop_indices(kept_item)
+        indexed_text = normalize_text(
+            "".join(
+                str(segments[index - 1].text or "")
+                for index in kept_indices
+                if 1 <= index <= len(segments)
+            )
+        )
+        if expected_text in timeline_text and (not indexed_text or expected_text in indexed_text):
+            no_blocker: Blocker | None = None
+            return no_blocker
+        return Blocker(
+            code="V21_FINAL_TARGET_REPEAT_KEPT_SIDE_NOT_MATERIALIZED",
+            message="final target repeat semantic decision kept a side that is not materialized in the final timeline",
+            layer="decision",
+            severity="write_blocker",
+            context={
+                "cluster_id": cluster_id,
+                "decision": "keep_longest_drop_others",
+                "expected_kept_text": expected_text,
+                "kept_indices": kept_indices,
+                "indexed_kept_text": indexed_text,
+                "final_timeline_text": timeline_text,
+            },
+        )
+
+    def _protected_semantic_drop_reason(self, drop_indices: list[int], segments: list[FinalTimelineSegment]) -> str:
+        for drop_index in drop_indices:
+            if not (1 <= drop_index <= len(segments)):
+                continue
+            dropped = segments[drop_index - 1]
+            dropped_text = normalize_text(str(dropped.text or ""))
+            if not dropped_text or not is_open_predicate_bridge(dropped_text):
+                continue
+            previous = segments[drop_index - 2] if drop_index > 1 else None
+            next_segment = segments[drop_index] if drop_index < len(segments) else None
+            has_context = (
+                previous is not None
+                and normalize_text(str(previous.text or ""))
+                and self._segments_source_contiguous(previous, dropped)
+            ) or (
+                next_segment is not None
+                and normalize_text(str(next_segment.text or ""))
+                and self._segments_source_contiguous(dropped, next_segment)
+            )
+            if has_context:
+                return "semantic containment drop would remove an open predicate bridge required by neighboring source context"
+        return ""
+
+    def _keep_longest_item(self, cluster: dict[str, Any]) -> dict[str, Any] | None:
+        items = [item for item in list(cluster.get("items") or []) if isinstance(item, dict)]
+        if not items:
+            no_item: dict[str, Any] | None = None
+            return no_item
+        longest = items[0]
+        longest_len = len(normalize_text(self._item_decision_text(longest)))
+        for item in items[1:]:
+            text_len = len(normalize_text(self._item_decision_text(item)))
+            if text_len > longest_len:
+                longest = item
+                longest_len = text_len
+        return longest
+
+    def _has_blocker(self, decision_plan: DecisionPlan, code: str, cluster_id: str) -> bool:
+        return any(
+            blocker.code == code
+            and blocker.severity == "write_blocker"
+            and str(blocker.context.get("cluster_id") or "") == cluster_id
+            for blocker in decision_plan.blockers
+        )
 
     def _item_decision_text(self, item: dict[str, Any]) -> str:
         return str(item.get("decision_text") or item.get("semantic_text") or item.get("text") or item.get("subtitle_text") or "")

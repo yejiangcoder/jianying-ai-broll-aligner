@@ -155,10 +155,9 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         self.assertEqual(report["blocking_candidate_type_counts"]["short_restart_residue_island"], 1)
         self.assertIn("V21_FINAL_TIMELINE_SHORT_RESTART_RESIDUE", report["blocker_codes"])
 
-    def test_semantic_bridge_short_overlap_is_report_only_without_visual_gap_split(self) -> None:
+    def test_semantic_bridge_single_overlap_expected_removed_text_still_visible_blocks_write(self) -> None:
         words = [
-            _word("w189", "给你", 62_560_000, 62_900_000, 31),
-            _word("w190", "四分", 62_900_000, 63_360_000, 31),
+            _word("w190", "四分", 62_560_000, 63_360_000, 31),
             _word("w191", "但凡", 63_666_666, 64_026_666, 32),
             _word("w192", "任何", 64_026_666, 64_360_000, 32),
             _word("w193", "一个", 64_360_000, 64_620_000, 32),
@@ -167,8 +166,8 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         timeline = [
             _segment(
                 "v21_seg_000020",
-                ["w189", "w190"],
-                "给你四分",
+                ["w190"],
+                "四分",
                 62_560_000,
                 63_360_000,
                 debug_hints={"safe_handle_requested_lead_us": 320_000},
@@ -193,7 +192,183 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         self.assertEqual(candidates[0]["severity"], "warning")
         self.assertTrue(candidates[0]["is_semantic_bridge"])
         self.assertFalse(candidates[0]["is_visual_gap_split"])
-        self.assertNotIn("V21_FINAL_TIMELINE_SHORT_RESTART_RESIDUE", report["blocker_codes"])
+        self.assertFalse(candidates[0]["semantic_restart_residue_safe_drop"])
+        residuals = [row for row in report["candidates"] if row["type"] == "expected_removed_text_still_visible"]
+        self.assertEqual(len(residuals), 1, report)
+        self.assertEqual(residuals[0]["expected_removed_text"], "四分")
+        self.assertEqual(residuals[0]["source_intent_type"], "drop_restart_residue_segment")
+        self.assertIn("V21_FINAL_TIMELINE_EXPECTED_REMOVED_TEXT_STILL_VISIBLE", report["blocker_codes"])
+        self.assertFalse(report["gate_passed"])
+
+    def test_repair_pipeline_drops_multi_overlap_semantic_restart_residue(self) -> None:
+        words = [
+            _word("w189", "给", 62_560_000, 62_720_000, 31),
+            _word("w190", "你", 62_720_000, 62_900_000, 31),
+            _word("w191", "四分", 62_900_000, 63_360_000, 31),
+            _word("w192", "但凡", 63_666_666, 64_026_666, 32),
+            _word("w193", "任何", 64_026_666, 64_360_000, 32),
+            _word("w194", "一个", 64_360_000, 64_620_000, 32),
+            _word("w195", "四分女", 64_620_000, 65_100_000, 32),
+            _word("w196", "但凡", 65_180_000, 65_460_000, 32),
+            _word("w197", "给", 65_460_000, 65_620_000, 32),
+            _word("w198", "你", 65_620_000, 65_780_000, 32),
+            _word("w199", "释放", 65_780_000, 66_060_000, 32),
+            _word("w200", "好感", 66_060_000, 66_360_000, 32),
+        ]
+        graph = _graph(words)
+        timeline = [
+            _segment(
+                "v21_seg_000020",
+                ["w189", "w190", "w191"],
+                "给你四分",
+                62_560_000,
+                63_360_000,
+                debug_hints={"safe_handle_requested_lead_us": 320_000},
+            ),
+            _segment(
+                "v21_seg_000021",
+                ["w192", "w193", "w194", "w195", "w196", "w197", "w198", "w199", "w200"],
+                "但凡任何一个四分女但凡给你释放好感",
+                63_666_666,
+                66_360_000,
+            ),
+        ]
+        renderer = SubtitleRenderer()
+
+        initial_report = build_final_timeline_quality_guard_report(
+            source_graph=graph,
+            final_timeline=timeline,
+            captions=renderer.render(timeline, graph),
+        )
+        candidate = [row for row in initial_report["candidates"] if row["type"] == "short_restart_residue_island"][0]
+        self.assertTrue(candidate["semantic_restart_residue_safe_drop"], initial_report)
+        self.assertEqual(candidate["semantic_restart_overlap_units"], ["四分", "给你"])
+        intent = initial_report["repair_intent_report"]["repair_intents"][0]
+        self.assertEqual(intent["safety_level"], "deterministic_candidate")
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=renderer.render(timeline, graph),
+            source_graph=graph,
+            render_captions=lambda rows: renderer.render(rows, graph),
+            max_passes=8,
+        )
+
+        visible = "".join(caption.text for caption in result.captions)
+        self.assertNotIn("给你四分", visible)
+        self.assertEqual([segment.text for segment in result.final_timeline], ["但凡任何一个四分女但凡给你释放好感"])
+        final_report = build_final_timeline_quality_guard_report(
+            source_graph=graph,
+            final_timeline=result.final_timeline,
+            captions=result.captions,
+        )
+        self.assertTrue(final_report["gate_passed"], final_report)
+
+    def test_complete_short_question_is_not_restart_residue(self) -> None:
+        words = [
+            _word("w213", "你", 70_533_333, 70_773_333, 38),
+            _word("w214", "信", 70_773_333, 70_893_333, 38),
+            _word("w215", "不信", 70_893_333, 71_453_333, 38),
+            _word("w216", "你", 71_800_000, 72_080_000, 39),
+            _word("w217", "属于", 72_080_000, 72_360_000, 39),
+            _word("w218", "是", 72_360_000, 72_560_000, 39),
+            _word("w219", "被迫", 72_560_000, 72_840_000, 39),
+            _word("w220", "中仓", 73_000_000, 73_360_000, 39),
+        ]
+        timeline = [
+            _segment(
+                "v21_seg_000022",
+                ["w213", "w214", "w215"],
+                "你信不信",
+                70_533_333,
+                71_453_333,
+                debug_hints={"visual_pacing_large_intra_segment_gap_split": True},
+            ),
+            _segment(
+                "v21_seg_000023",
+                ["w216", "w217", "w218", "w219", "w220"],
+                "你属于是被迫中仓",
+                71_800_000,
+                73_360_000,
+            ),
+        ]
+
+        report = build_final_timeline_quality_guard_report(
+            source_graph=_graph(words),
+            final_timeline=timeline,
+            captions=[],
+        )
+
+        self.assertNotIn("short_restart_residue_island", report["candidate_type_counts"], report)
+        self.assertEqual(report["repair_intent_count"], 0, report)
+        self.assertTrue(report["gate_passed"], report)
+
+    def test_enumeration_slot_is_not_restart_residue(self) -> None:
+        words = [
+            _word("w870", "以下", 10_000_000, 10_200_000, 1),
+            _word("w871", "几个", 10_200_000, 10_500_000, 1),
+            _word("w872", "基调", 10_500_000, 10_800_000, 1),
+            _word("w873", "的", 10_800_000, 10_900_000, 1),
+            _word("w874", "香水", 10_900_000, 11_200_000, 1),
+            _word("w875", "雪松", 11_600_000, 11_900_000, 2),
+            _word("w876", "檀木", 12_300_000, 12_600_000, 2),
+            _word("w877", "香根草", 12_900_000, 13_300_000, 2),
+            _word("w878", "那么", 13_300_000, 13_600_000, 3),
+            _word("w879", "雪松", 13_600_000, 13_900_000, 3),
+            _word("w880", "的", 13_900_000, 14_000_000, 3),
+            _word("w881", "冷", 14_000_000, 14_300_000, 3),
+        ]
+        timeline = [
+            _segment("v21_seg_000001", ["w870", "w871", "w872", "w873", "w874"], "以下几个基调的香水", 10_000_000, 11_200_000),
+            _segment(
+                "v21_seg_000002",
+                ["w875", "w876"],
+                "雪松檀木",
+                11_600_000,
+                12_600_000,
+                debug_hints={"safe_handle_requested_lead_us": 320_000},
+            ),
+            _segment("v21_seg_000003", ["w877", "w878", "w879", "w880", "w881"], "香根草那么雪松的冷", 12_900_000, 14_300_000),
+        ]
+
+        report = build_final_timeline_quality_guard_report(
+            source_graph=_graph(words),
+            final_timeline=timeline,
+            captions=[],
+        )
+
+        self.assertNotIn("short_restart_residue_island", report["candidate_type_counts"], report)
+        self.assertTrue(report["gate_passed"], report)
+
+    def test_particle_only_overlap_is_not_restart_residue(self) -> None:
+        words = [
+            _word("w886", "檀木", 20_000_000, 20_280_000, 1),
+            _word("w887", "的", 20_280_000, 20_440_000, 1),
+            _word("w888", "沉", 20_520_000, 20_800_000, 1),
+            _word("w889", "香根草", 21_000_000, 21_480_000, 2),
+            _word("w890", "的", 21_480_000, 21_620_000, 2),
+            _word("w891", "泥土味", 21_620_000, 22_100_000, 2),
+        ]
+        timeline = [
+            _segment(
+                "v21_seg_000001",
+                ["w886", "w887", "w888"],
+                "檀木的沉",
+                20_000_000,
+                20_800_000,
+                debug_hints={"safe_handle_requested_lead_us": 320_000},
+            ),
+            _segment("v21_seg_000002", ["w889", "w890", "w891"], "香根草的泥土味", 21_000_000, 22_100_000),
+        ]
+
+        report = build_final_timeline_quality_guard_report(
+            source_graph=_graph(words),
+            final_timeline=timeline,
+            captions=[],
+        )
+
+        self.assertNotIn("short_restart_residue_island", report["candidate_type_counts"], report)
+        self.assertTrue(report["gate_passed"], report)
 
     def test_reports_dangling_connector_caption_mismatch_and_missing_lead_handle(self) -> None:
         words = [
@@ -535,6 +710,65 @@ class FinalTimelineQualityGuardTest(unittest.TestCase):
         second = result.final_timeline[1]
         self.assertEqual(second.lead_handle_us, 200_000)
         self.assertEqual(second.clip_source_start_us, 1_900_000)
+        guard = build_final_timeline_quality_guard_report(
+            source_graph=graph,
+            final_timeline=result.final_timeline,
+            captions=result.captions,
+        )
+        self.assertTrue(guard["gate_passed"], guard)
+
+    def test_intra_sentence_pause_gap_blocks_and_emits_safe_split_intent(self) -> None:
+        words = [
+            _word("w001", "前半句", 0, 700_000, 1),
+            _word("w002", "后半句", 1_080_000, 1_780_000, 1),
+        ]
+        graph = _graph(words)
+        timeline = [_segment("v21_seg_000001", ["w001", "w002"], "前半句后半句", 0, 1_780_000)]
+
+        report = build_final_timeline_quality_guard_report(
+            source_graph=graph,
+            final_timeline=timeline,
+            captions=[_caption("cap001", "v21_seg_000001", ["w001", "w002"], "前半句后半句", 0, 1_780_000)],
+        )
+
+        candidates = [row for row in report["candidates"] if row["type"] == "intra_sentence_pause_gap_exceeds_limit"]
+        self.assertEqual(len(candidates), 1, report)
+        self.assertEqual(candidates[0]["gap_us"], 380_000)
+        self.assertTrue(candidates[0]["safe_split_available"])
+        self.assertFalse(report["gate_passed"])
+        self.assertIn("V21_FINAL_TIMELINE_INTRA_SENTENCE_PAUSE_GAP_EXCEEDS_LIMIT", report["blocker_codes"])
+        intents = report["repair_intent_report"]["repair_intents"]
+        split_intents = [row for row in intents if row["intent_type"] == "split_intra_sentence_pause_gap"]
+        self.assertEqual(len(split_intents), 1, report)
+        self.assertEqual(split_intents[0]["safety_level"], "deterministic_candidate")
+        self.assertTrue(split_intents[0]["safe_cut_recompute_required"])
+        self.assertEqual(split_intents[0]["left_word_ids"], ["w001"])
+        self.assertEqual(split_intents[0]["right_word_ids"], ["w002"])
+
+    def test_repair_pipeline_splits_intra_sentence_pause_gap_and_recomputes_safe_cut(self) -> None:
+        words = [
+            _word("w001", "前半句", 0, 700_000, 1),
+            _word("w002", "后半句", 1_080_000, 1_780_000, 1),
+        ]
+        graph = _graph(words)
+        timeline = [_segment("v21_seg_000001", ["w001", "w002"], "前半句后半句", 0, 1_780_000)]
+        renderer = SubtitleRenderer()
+
+        result = repair_final_visible_caption_issues(
+            final_timeline=timeline,
+            captions=renderer.render(timeline, graph),
+            source_graph=graph,
+            render_captions=lambda rows: renderer.render(rows, graph),
+            max_passes=8,
+        )
+
+        self.assertEqual([segment.text for segment in result.final_timeline], ["前半句", "后半句"])
+        self.assertEqual([segment.target_start_us for segment in result.final_timeline], [0, 700_000])
+        self.assertTrue(
+            all(segment.debug_hints.get("safe_handle_recomputed_by_final_timeline_intent") for segment in result.final_timeline)
+        )
+        actions = result.report["final_timeline_repair_intent_actions"]
+        self.assertTrue(any(action["intent_type"] == "split_intra_sentence_pause_gap" for action in actions), actions)
         guard = build_final_timeline_quality_guard_report(
             source_graph=graph,
             final_timeline=result.final_timeline,

@@ -6,6 +6,9 @@ from aroll_v21.quality.final_caption_visible.policy import (
     blocking_policy_blocker_codes,
     policy_decision_counts,
 )
+from aroll_v21.quality.final_caption_visible.semantic_arbitration import (
+    build_final_visible_repeat_semantic_arbitration_report,
+)
 from aroll_v21.quality.final_caption_visible.types import (
     FinalCaptionVisibleClassification,
     FinalCaptionVisibleEvidence,
@@ -13,6 +16,10 @@ from aroll_v21.quality.final_caption_visible.types import (
     FinalCaptionVisibleRepairSignal,
 )
 from aroll_v21.quality.final_semantic_integrity import semantic_integrity_reason_counts
+from aroll_v21.quality.final_visible_repeat_classification import (
+    REPEAT_SEMANTIC_CLASS_DESCRIPTIONS,
+    semantic_repeat_class_counts,
+)
 
 
 def build_final_caption_visible_gate_report(
@@ -28,6 +35,9 @@ def build_final_caption_visible_gate_report(
 ) -> dict[str, Any]:
     blocker_codes = blocking_policy_blocker_codes(policy_decisions)
     repair_signal_report = repair_signal.to_report()
+    semantic_arbitration_report = build_final_visible_repeat_semantic_arbitration_report(
+        classification.classified_repeat_candidates
+    )
     return {
         "gate_passed": not blocker_codes,
         "blocker_codes": blocker_codes,
@@ -37,6 +47,15 @@ def build_final_caption_visible_gate_report(
         "visible_repeat_allow_candidate_count": len(classification.repeat_allowed_candidates),
         "repeat_classification_candidate_count": len(classification.classified_repeat_candidates),
         "repeat_classification_candidates": classification.classified_repeat_candidates,
+        "repeat_semantic_class_counts": semantic_repeat_class_counts(classification.classified_repeat_candidates),
+        "repeat_semantic_class_definitions": dict(REPEAT_SEMANTIC_CLASS_DESCRIPTIONS),
+        "repeat_semantic_arbitration_candidate_count": int(semantic_arbitration_report["candidate_count"]),
+        "repeat_semantic_arbitration_request_count": int(semantic_arbitration_report["request_count"]),
+        "repeat_semantic_arbitration_candidate_ids": list(semantic_arbitration_report["candidate_ids"]),
+        "repeat_semantic_arbitration_candidates": list(semantic_arbitration_report["candidates"]),
+        "repeat_semantic_arbitration_request_payloads": list(semantic_arbitration_report["request_payloads"]),
+        "repeat_semantic_arbitration_mode": str(semantic_arbitration_report["mode"]),
+        "repeat_semantic_arbitration_provider": str(semantic_arbitration_report["provider"]),
         "visible_repeat_warning_candidates": classification.repeat_warning_candidates,
         "visible_repeat_allow_candidates": classification.repeat_allowed_candidates,
         "containment_repeat_count": len(classification.containment_candidates),

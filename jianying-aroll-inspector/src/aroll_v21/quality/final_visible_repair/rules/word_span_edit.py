@@ -5,6 +5,7 @@ from typing import Any
 
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, CaptionRenderUnit, FinalTimelineSegment
+from aroll_v21.quality.boundary_overlap import is_open_predicate_bridge
 from aroll_v21.quality.final_visible_repair.report import _is_prefix, _is_suffix, _unique
 from aroll_v21.quality.final_visible_repair.timeline_utils import (
     caption_segment_ids as _caption_segment_ids,
@@ -15,6 +16,7 @@ from aroll_v21.quality.subtitle_readability import HARD_MAX_CHARS, HARD_MAX_DURA
 
 
 MIN_REPAIRED_SEGMENT_DURATION_US = 1_200_000
+MAX_PROTECTED_BRIDGE_CONTEXT_GAP_US = 800_000
 
 
 def _drop_or_trim_caption_words(
@@ -52,18 +54,30 @@ def _trim_word_ids_from_timeline(
     drop_set = set(drop_word_ids)
     repaired: list[FinalTimelineSegment] = []
     changed = False
-    for segment in final_timeline:
+    for segment_index, segment in enumerate(final_timeline):
         word_ids = list(segment.word_ids)
         if not drop_set.intersection(word_ids):
             repaired.append(segment)
             continue
         if _is_prefix(word_ids, drop_word_ids):
+            dropped_from_segment = word_ids[: len(drop_word_ids)]
             remaining = word_ids[len(drop_word_ids) :]
         elif _is_suffix(word_ids, drop_word_ids):
+            dropped_from_segment = word_ids[len(word_ids) - len(drop_word_ids) :]
             remaining = word_ids[: len(word_ids) - len(drop_word_ids)]
         elif set(word_ids) == drop_set:
+            dropped_from_segment = word_ids
             remaining = []
         else:
+            no_trim: list[FinalTimelineSegment] | None = None
+            return no_trim
+        if _would_drop_protected_open_predicate_bridge(
+            final_timeline=final_timeline,
+            segment_index=segment_index,
+            segment_word_ids=word_ids,
+            dropped_word_ids=dropped_from_segment,
+            source_graph=source_graph,
+        ):
             no_trim: list[FinalTimelineSegment] | None = None
             return no_trim
         changed = True
@@ -97,7 +111,7 @@ def _drop_contiguous_word_ids_from_timeline(
     repaired: list[FinalTimelineSegment] = []
     changed = False
     existing_segment_ids = {segment.segment_id for segment in final_timeline}
-    for segment in final_timeline:
+    for segment_index, segment in enumerate(final_timeline):
         word_ids = list(segment.word_ids)
         positions = [index for index, word_id in enumerate(word_ids) if word_id in drop_set]
         if not positions:
@@ -110,6 +124,16 @@ def _drop_contiguous_word_ids_from_timeline(
             return no_trim
         prefix_word_ids = word_ids[:start]
         suffix_word_ids = word_ids[end:]
+        dropped_from_segment = word_ids[start:end]
+        if _would_drop_protected_open_predicate_bridge(
+            final_timeline=final_timeline,
+            segment_index=segment_index,
+            segment_word_ids=word_ids,
+            dropped_word_ids=dropped_from_segment,
+            source_graph=source_graph,
+        ):
+            no_trim: list[FinalTimelineSegment] | None = None
+            return no_trim
         if not prefix_word_ids and not suffix_word_ids:
             changed = True
             continue
@@ -151,6 +175,76 @@ def _contains_contiguous_subsequence(values: list[str], subsequence: list[str]) 
         return False
     width = len(subsequence)
     return any(values[index : index + width] == subsequence for index in range(0, len(values) - width + 1))
+
+
+def _would_drop_protected_open_predicate_bridge(
+    *,
+    final_timeline: list[FinalTimelineSegment],
+    segment_index: int,
+    segment_word_ids: list[str],
+    dropped_word_ids: list[str],
+    source_graph: CanonicalSourceGraph,
+) -> bool:
+    dropped_text = normalize_text(_text_from_word_ids(dropped_word_ids, source_graph))
+    if not dropped_text or not is_open_predicate_bridge(dropped_text):
+        return False
+    span = _word_id_span(segment_word_ids, dropped_word_ids)
+    if span is None:
+        return False
+    start, end = span
+    words_by_id = {word.word_id: word for word in source_graph.words}
+    first_dropped = words_by_id.get(dropped_word_ids[0])
+    last_dropped = words_by_id.get(dropped_word_ids[-1])
+    if first_dropped is None or last_dropped is None:
+        return False
+    previous_word_id = segment_word_ids[start - 1] if start > 0 else _adjacent_segment_word_id(final_timeline, segment_index, -1)
+    next_word_id = segment_word_ids[end] if end < len(segment_word_ids) else _adjacent_segment_word_id(final_timeline, segment_index, 1)
+    previous_word = words_by_id.get(previous_word_id) if previous_word_id else None
+    next_word = words_by_id.get(next_word_id) if next_word_id else None
+    return (
+        previous_word is not None
+        and _words_source_contiguous(previous_word, first_dropped)
+    ) or (
+        next_word is not None
+        and _words_source_contiguous(last_dropped, next_word)
+    )
+
+
+def _word_id_span(values: list[str], subsequence: list[str]) -> tuple[int, int] | None:
+    if not values or not subsequence or len(subsequence) > len(values):
+        no_span: tuple[int, int] | None = None
+        return no_span
+    width = len(subsequence)
+    for index in range(0, len(values) - width + 1):
+        if values[index : index + width] == subsequence:
+            return index, index + width
+    no_span: tuple[int, int] | None = None
+    return no_span
+
+
+def _adjacent_segment_word_id(
+    final_timeline: list[FinalTimelineSegment],
+    segment_index: int,
+    direction: int,
+) -> str:
+    adjacent_index = int(segment_index) + int(direction)
+    if adjacent_index < 0 or adjacent_index >= len(final_timeline):
+        return ""
+    word_ids = list(final_timeline[adjacent_index].word_ids)
+    if not word_ids:
+        return ""
+    return word_ids[-1] if direction < 0 else word_ids[0]
+
+
+def _words_source_contiguous(left: Any, right: Any) -> bool:
+    if str(getattr(left, "source_material_id", "") or "") and str(getattr(right, "source_material_id", "") or ""):
+        if str(getattr(left, "source_material_id", "") or "") != str(getattr(right, "source_material_id", "") or ""):
+            return False
+    if str(getattr(left, "source_segment_id", "") or "") and str(getattr(right, "source_segment_id", "") or ""):
+        if str(getattr(left, "source_segment_id", "") or "") != str(getattr(right, "source_segment_id", "") or ""):
+            return False
+    gap_us = int(getattr(right, "source_start_us", 0) or 0) - int(getattr(left, "source_end_us", 0) or 0)
+    return -80_000 <= gap_us <= MAX_PROTECTED_BRIDGE_CONTEXT_GAP_US
 
 
 def _leading_word_ids_for_text(

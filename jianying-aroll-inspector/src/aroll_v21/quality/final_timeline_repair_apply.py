@@ -115,6 +115,8 @@ def _apply_intent(
     intent_type = str(intent.get("intent_type") or "")
     if intent_type == "drop_restart_residue_segment":
         return _apply_drop_segment_intent(intent, final_timeline, source_graph, render_captions, pass_index)
+    if intent_type == "split_intra_sentence_pause_gap":
+        return _apply_split_intra_sentence_pause_gap_intent(intent, final_timeline, source_graph, render_captions, pass_index)
     if intent_type == "trim_dangling_words_before_connector":
         return _apply_trim_leading_word_ids_intent(intent, final_timeline, source_graph, render_captions, pass_index)
     if intent_type == "refresh_segment_text_from_source_words":
@@ -154,23 +156,27 @@ def _apply_drop_segment_intent(
 ) -> FinalTimelineRepairApplyResult | None:
     segment_id = str(intent.get("segment_id") or "")
     drop_word_ids = _string_list(intent.get("drop_word_ids"))
-    if not bool(intent.get("is_visual_gap_split")):
+    semantic_safe_drop = bool(intent.get("semantic_restart_residue_safe_drop"))
+    if not bool(intent.get("is_visual_gap_split")) and not semantic_safe_drop:
         no_result: FinalTimelineRepairApplyResult | None = None
         return no_result
-    if not segment_id or not drop_word_ids:
+    if not drop_word_ids:
         no_result: FinalTimelineRepairApplyResult | None = None
         return no_result
     kept: list[FinalTimelineSegment] = []
     dropped: FinalTimelineSegment | None = None
     for segment in final_timeline:
-        if str(segment.segment_id) != segment_id:
+        if _string_list(segment.word_ids) != drop_word_ids:
             kept.append(segment)
             continue
-        if _string_list(segment.word_ids) != drop_word_ids:
-            no_result = None
-            return no_result
+        if segment_id and str(segment.segment_id) != segment_id:
+            segment_id = str(segment.segment_id)
         dropped = segment
     if dropped is None or not kept:
+        no_result = None
+        return no_result
+    expected_preserved_text = str(intent.get("expected_preserved_text") or "")
+    if expected_preserved_text and not _timeline_contains_source_text(kept, source_graph, expected_preserved_text):
         no_result = None
         return no_result
     repaired = _repack_and_recompute_handles(kept, source_graph)
@@ -183,6 +189,7 @@ def _apply_drop_segment_intent(
             decision="drop_restart_residue_segment",
             dropped_segment_id=segment_id,
             dropped_word_ids=drop_word_ids,
+            semantic_restart_residue_safe_drop=semantic_safe_drop,
         ),
         timeline_changed=True,
     )
@@ -240,6 +247,89 @@ def _apply_trim_leading_word_ids_intent(
             kept_word_ids=list(trimmed_segment.word_ids),
         ),
         timeline_changed=True,
+    )
+
+
+def _apply_split_intra_sentence_pause_gap_intent(
+    intent: dict[str, Any],
+    final_timeline: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    render_captions: Callable[[list[FinalTimelineSegment]], list[CaptionRenderUnit]],
+    pass_index: int,
+) -> FinalTimelineRepairApplyResult | None:
+    segment_id = str(intent.get("segment_id") or "")
+    left_word_ids = _string_list(intent.get("left_word_ids"))
+    right_word_ids = _string_list(intent.get("right_word_ids"))
+    if not segment_id or not left_word_ids or not right_word_ids:
+        no_result: FinalTimelineRepairApplyResult | None = None
+        return no_result
+    repaired: list[FinalTimelineSegment] = []
+    split_segment: FinalTimelineSegment | None = None
+    split_left: FinalTimelineSegment | None = None
+    split_right: FinalTimelineSegment | None = None
+    for segment in final_timeline:
+        if str(segment.segment_id) != segment_id:
+            repaired.append(segment)
+            continue
+        word_ids = _string_list(segment.word_ids)
+        if word_ids != [*left_word_ids, *right_word_ids]:
+            no_result = None
+            return no_result
+        split_segment = segment
+        left = _segment_from_word_ids(
+            segment,
+            left_word_ids,
+            source_graph,
+            repair_reason="final_timeline_intent_split_intra_sentence_pause_gap_left",
+        )
+        right = _segment_from_word_ids(
+            segment,
+            right_word_ids,
+            source_graph,
+            repair_reason="final_timeline_intent_split_intra_sentence_pause_gap_right",
+        )
+        if left is None or right is None:
+            no_result = None
+            return no_result
+        split_left = _mark_pause_gap_split_segment(left, intent)
+        split_right = _mark_pause_gap_split_segment(right, intent)
+        repaired.extend([split_left, split_right])
+    if split_segment is None or split_left is None or split_right is None:
+        no_result = None
+        return no_result
+    repaired = _repack_and_recompute_handles(repaired, source_graph)
+    return FinalTimelineRepairApplyResult(
+        final_timeline=repaired,
+        captions=render_captions(repaired),
+        action=_action_from_intent(
+            intent,
+            pass_index,
+            decision="split_intra_sentence_pause_gap",
+            split_segment_id=segment_id,
+            split_after_word_id=str(intent.get("split_after_word_id") or ""),
+            split_before_word_id=str(intent.get("split_before_word_id") or ""),
+            left_word_ids=left_word_ids,
+            right_word_ids=right_word_ids,
+            gap_us=int(intent.get("gap_us") or 0),
+        ),
+        timeline_changed=True,
+    )
+
+
+def _mark_pause_gap_split_segment(segment: FinalTimelineSegment, intent: dict[str, Any]) -> FinalTimelineSegment:
+    debug_hints = dict(segment.debug_hints or {})
+    debug_hints.update(
+        {
+            "safe_handle_policy_enabled": True,
+            "final_timeline_intent_split_intra_sentence_pause_gap": True,
+            "intra_sentence_pause_gap_us": int(intent.get("gap_us") or 0),
+            "intra_sentence_pause_gap_threshold_us": int(intent.get("max_allowed_gap_us") or 0),
+        }
+    )
+    return replace(
+        segment,
+        decision_ids=sorted(set([*segment.decision_ids, "final_timeline_intent_split_intra_sentence_pause_gap"])),
+        debug_hints=debug_hints,
     )
 
 
@@ -462,6 +552,22 @@ def _source_segment_bounds(row: dict[str, Any]) -> tuple[int, int]:
         if start is not None and end is not None and end > start:
             return start, end
     return 0, 0
+
+
+def _timeline_contains_source_text(
+    segments: list[FinalTimelineSegment],
+    source_graph: CanonicalSourceGraph,
+    expected_text: str,
+) -> bool:
+    expected = normalize_text(expected_text)
+    if not expected:
+        return True
+    words_by_id = {str(word.word_id): word for word in source_graph.words}
+    for segment in segments:
+        source_text = "".join(str(words_by_id[word_id].text) for word_id in _string_list(segment.word_ids) if word_id in words_by_id)
+        if normalize_text(source_text) == expected:
+            return True
+    return False
 
 
 def _time_value(value: Any) -> int | None:

@@ -11,7 +11,7 @@ from aroll_v21 import ArollEngine
 from aroll_v21.decision import SemanticAdjudicationDecisionType, SemanticDecisionPlanner
 from aroll_v21.decision.final_target_repeat_resolver import FinalTargetRepeatResolver
 from aroll_v21.engine import AUTO_PROVIDER_ROUTING_SKIPPED_CODE, FINAL_TARGET_PROVIDER_FAILURE_CODE
-from aroll_v21.ir import CaptionRenderUnit, DecisionPlan
+from aroll_v21.ir import CaptionRenderUnit, DecisionPlan, FinalTimelineSegment
 from aroll_v21.operator import ArollV21OperatorConfig, run_operator
 from tests.test_aroll_v21_semantic_adjudication_layer import (
     FailingSemanticProvider,
@@ -179,6 +179,64 @@ class ArollV21FinalTargetRepeatAutoProviderTests(unittest.TestCase):
                 for row in report.decision_trace
             )
         )
+
+    def test_keep_longest_drop_others_blocks_when_kept_side_not_materialized(self) -> None:
+        segment = FinalTimelineSegment(
+            segment_id="v21_seg_000001",
+            source_material_id="main",
+            source_segment_id="clip_1",
+            source_start_us=1_000_000,
+            source_end_us=1_800_000,
+            target_start_us=0,
+            target_end_us=800_000,
+            word_ids=["w001"],
+            text="就永远是",
+            decision_ids=[],
+        )
+        plan = DecisionPlan(
+            decisions=[],
+            semantic_decision_rows=[
+                {
+                    "cluster_id": "final_target_repeat_tc_missing_kept_side",
+                    "decision": "keep_longest_drop_others",
+                    "reason": "keep the semantically complete side",
+                }
+            ],
+        )
+
+        def _missing_kept_side_clusters(_resolver, _segments):  # type: ignore[no-untyped-def]
+            return [
+                {
+                    "cluster_id": "tc_missing_kept_side",
+                    "cluster_type": "semantic_containment_take",
+                    "confidence": "medium",
+                    "severity": "medium",
+                    "requires_llm": True,
+                    "items": [
+                        {
+                            "subtitle_index": 1,
+                            "subtitle_uid": "missing_long_side",
+                            "text": "女人就永远是",
+                            "decision_text": "女人就永远是",
+                        },
+                        {
+                            "subtitle_index": 1,
+                            "subtitle_uid": "v21_seg_000001",
+                            "text": "就永远是",
+                            "decision_text": "就永远是",
+                        },
+                    ],
+                }
+            ]
+
+        with patch.object(FinalTargetRepeatResolver, "_clusters", _missing_kept_side_clusters):
+            final_timeline, blockers = FinalTargetRepeatResolver().resolve([segment], plan)
+
+        self.assertEqual([row.text for row in final_timeline], ["就永远是"])
+        self.assertIn("V21_FINAL_TARGET_REPEAT_KEPT_SIDE_NOT_MATERIALIZED", [blocker.code for blocker in blockers])
+        self.assertIn("V21_FINAL_TARGET_REPEAT_KEPT_SIDE_NOT_MATERIALIZED", [blocker.code for blocker in plan.blockers])
+        self.assertFalse(plan.write_allowed)
+        self.assertEqual(plan.final_target_repeat_unresolved_cluster_ids, ["final_target_repeat_tc_missing_kept_side"])
 
     def test_final_target_repeat_provider_error_reports_called_count(self) -> None:
         provider = RaisingSemanticProvider()

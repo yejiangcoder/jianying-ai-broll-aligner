@@ -49,6 +49,32 @@ _ENUMERATION_BAD_SUFFIX_ENDS = (
     "让",
     "使",
 )
+_PARALLEL_SLOT_LEADS = (
+    "那么",
+    "然后",
+    "所以",
+    "因为",
+    "但是",
+    "而且",
+    "并且",
+    "他要",
+    "她要",
+    "它要",
+)
+_CAN_OR_NOT = "能不" + "能"
+_PARALLEL_SLOT_FRAMES = (
+    ("扫描你的", "scan_your"),
+    ("扫描你", "scan_you"),
+    ("看你" + _CAN_OR_NOT + "给她", "can_give_her"),
+    ("你" + _CAN_OR_NOT + "给她", "can_give_her"),
+    (_CAN_OR_NOT + "给她", "can_give_her"),
+    ("看你" + _CAN_OR_NOT + "给他", "can_give_him"),
+    ("你" + _CAN_OR_NOT + "给他", "can_give_him"),
+    (_CAN_OR_NOT + "给他", "can_give_him"),
+    ("看你" + _CAN_OR_NOT + "给它", "can_give_it"),
+    ("你" + _CAN_OR_NOT + "给它", "can_give_it"),
+    (_CAN_OR_NOT + "给它", "can_give_it"),
+)
 
 
 def recommended_drop_indices(row: dict[str, Any], cluster: dict[str, Any] | None = None) -> list[int]:
@@ -144,6 +170,9 @@ def parallel_enumeration_candidate(left_text: str, right_text: str) -> dict[str,
     right = normalize_text(right_text)
     if not left or not right or left == right:
         return no_candidate
+    slot_candidate = _parallel_slot_enumeration_candidate(left_text, right_text)
+    if slot_candidate is not None:
+        return slot_candidate
     if left in right or right in left:
         return no_candidate
     prefix_len = _common_prefix_len(left, right)
@@ -176,6 +205,80 @@ def parallel_enumeration_candidate(left_text: str, right_text: str) -> dict[str,
     }
 
 
+def _parallel_slot_enumeration_candidate(left_text: str, right_text: str) -> dict[str, Any] | None:
+    left_slot = _parallel_slot(left_text)
+    right_slot = _parallel_slot(right_text)
+    if left_slot is None or right_slot is None:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    left_frame, left_item = left_slot
+    right_frame, right_item = right_slot
+    if left_frame != right_frame:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    if not _looks_like_parallel_slot_item(left_item) or not _looks_like_parallel_slot_item(right_item):
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    if left_item == right_item or left_item in right_item or right_item in left_item:
+        no_candidate: dict[str, Any] | None = None
+        return no_candidate
+    return {
+        "reason": "parallel_slot_enumeration",
+        "left_text": left_text,
+        "right_text": right_text,
+        "left_normalized_text": normalize_text(left_text),
+        "right_normalized_text": normalize_text(right_text),
+        "common_prefix": left_frame,
+        "common_prefix_chars": _cjk_char_count(left_frame),
+        "left_item_text": left_item,
+        "right_item_text": right_item,
+    }
+
+
+def _parallel_slot(text: str) -> tuple[str, str] | None:
+    normalized = _strip_parallel_slot_leads(normalize_text(text))
+    if not normalized:
+        no_slot: tuple[str, str] | None = None
+        return no_slot
+    for prefix, frame in _PARALLEL_SLOT_FRAMES:
+        if not normalized.startswith(prefix):
+            continue
+        item = normalized[len(prefix) :]
+        item = _first_parallel_slot_item(item)
+        if not item:
+            no_slot: tuple[str, str] | None = None
+            return no_slot
+        return frame, item
+    no_slot: tuple[str, str] | None = None
+    return no_slot
+
+
+def _strip_parallel_slot_leads(text: str) -> str:
+    result = text
+    changed = True
+    while changed:
+        changed = False
+        for lead in _PARALLEL_SLOT_LEADS:
+            if result.startswith(lead) and len(result) > len(lead) + 1:
+                result = result[len(lead) :]
+                changed = True
+                break
+    return result
+
+
+def _first_parallel_slot_item(text: str) -> str:
+    end = len(text)
+    for prefix, _frame in _PARALLEL_SLOT_FRAMES:
+        pos = text.find(prefix)
+        if pos > 0:
+            end = min(end, pos)
+    for marker in ("看看", "看" + _CAN_OR_NOT, "看你" + _CAN_OR_NOT, "那么", "然后", "所以", "但是"):
+        pos = text.find(marker)
+        if pos > 0:
+            end = min(end, pos)
+    return text[:end]
+
+
 def _looks_like_parallel_item_suffix(text: str) -> bool:
     if not text:
         return False
@@ -187,6 +290,19 @@ def _looks_like_parallel_item_suffix(text: str) -> bool:
     if any(text.endswith(suffix) for suffix in _ENUMERATION_BAD_SUFFIX_ENDS):
         return False
     if text in _OPEN_FILLER_SUFFIXES:
+        return False
+    return True
+
+
+def _looks_like_parallel_slot_item(text: str) -> bool:
+    if not text:
+        return False
+    cjk_count = _cjk_char_count(text)
+    if cjk_count < 2 or cjk_count > 14:
+        return False
+    if text in _OPEN_FILLER_SUFFIXES:
+        return False
+    if text in {"的", "地", "得", "了", "着", "过", "是"}:
         return False
     return True
 

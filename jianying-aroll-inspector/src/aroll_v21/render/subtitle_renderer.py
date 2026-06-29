@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from aroll_text_normalize import normalize_text
 from aroll_v21.ir.models import CanonicalSourceGraph, CaptionRenderUnit, FinalTimelineSegment
-from aroll_v21.quality.boundary_overlap import is_explanatory_term_reuse, is_semantic_label_reuse_boundary
+from aroll_v21.quality.boundary_overlap import (
+    is_explanatory_term_reuse,
+    is_open_predicate_bridge,
+    is_semantic_label_reuse_boundary,
+)
 from aroll_v21.quality.final_caption_visible_repeat import build_final_caption_visible_repeat_gate
 from aroll_v21.quality.subtitle_readability import (
     HARD_MAX_CHARS,
@@ -77,6 +82,9 @@ class SubtitleRenderer:
         repaired = _repair_visible_caption_repeats(cleaned)
         if not _preserves_caption_word_coverage(cleaned, repaired):
             repaired = cleaned
+        rebalanced = _rebalance_trailing_label_before_open_predicate(repaired, words_by_id)
+        if _preserves_caption_word_coverage(repaired, rebalanced):
+            repaired = rebalanced
         return _renumber_captions(repaired)
 
     def _caption_word_groups(self, words):
@@ -400,6 +408,144 @@ def _less_informative_caption_index(
 
 def _preserves_caption_word_coverage(before: list[CaptionRenderUnit], after: list[CaptionRenderUnit]) -> bool:
     return _caption_word_id_set(before) == _caption_word_id_set(after)
+
+
+def _rebalance_trailing_label_before_open_predicate(
+    captions: list[CaptionRenderUnit],
+    words_by_id: dict[str, object],
+) -> list[CaptionRenderUnit]:
+    current = sorted(captions, key=lambda row: (row.target_start_us, row.target_end_us, row.caption_id))
+    changed = True
+    while changed:
+        changed = False
+        for index in range(len(current) - 1):
+            rebalanced = _rebalance_caption_pair_trailing_label(current[index], current[index + 1], words_by_id)
+            if rebalanced is None:
+                continue
+            left, right = rebalanced
+            updated = list(current)
+            updated[index] = left
+            updated[index + 1] = right
+            current = updated
+            changed = True
+            break
+    return current
+
+
+def _rebalance_caption_pair_trailing_label(
+    left: CaptionRenderUnit,
+    right: CaptionRenderUnit,
+    words_by_id: dict[str, object],
+) -> tuple[CaptionRenderUnit, CaptionRenderUnit] | None:
+    if not left.word_ids or not right.word_ids:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    if int(right.target_start_us) < int(left.target_end_us):
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    moved_word_id = str(left.word_ids[-1])
+    moved_word = words_by_id.get(moved_word_id)
+    if moved_word is None:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    moved_text = str(getattr(moved_word, "text", "") or "")
+    if not _is_ascii_label_word(moved_text):
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    right_text = normalize_text(str(right.text or ""))
+    if not is_open_predicate_bridge(right_text):
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    left_word_ids = [str(word_id) for word_id in left.word_ids[:-1] if str(word_id)]
+    right_word_ids = [moved_word_id, *[str(word_id) for word_id in right.word_ids if str(word_id)]]
+    if not left_word_ids or len(_caption_text_from_word_ids(left_word_ids, words_by_id)) < 4:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    if len(_caption_text_from_word_ids(right_word_ids, words_by_id)) > HARD_MAX_CHARS:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    moved_start = _word_target_start_us(left, moved_word, words_by_id)
+    if moved_start is None:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    left_end = max(int(left.target_start_us) + MIN_DURATION_US, min(int(left.target_end_us), moved_start))
+    if left_end > int(left.target_end_us):
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    right_start = max(int(left_end), moved_start)
+    if int(right.target_end_us) - right_start < MIN_DURATION_US:
+        no_rebalance: tuple[CaptionRenderUnit, CaptionRenderUnit] | None = None
+        return no_rebalance
+    right_timeline_segment_ids = _unique([*left.timeline_segment_ids, *right.timeline_segment_ids])
+    right_container_id = (
+        right.containing_video_segment_id
+        if len(right_timeline_segment_ids) <= 1
+        else None
+    )
+    return (
+        replace(
+            left,
+            word_ids=left_word_ids,
+            text=_caption_text_from_word_ids(left_word_ids, words_by_id),
+            target_end_us=left_end,
+            source_subtitle_uids=_source_uids_for_word_ids(left_word_ids, words_by_id),
+            spoken_source_end_us=_word_source_end_us(left_word_ids[-1], words_by_id),
+        ),
+        replace(
+            right,
+            timeline_segment_ids=right_timeline_segment_ids,
+            word_ids=right_word_ids,
+            text=_caption_text_from_word_ids(right_word_ids, words_by_id),
+            target_start_us=right_start,
+            source_subtitle_uids=_source_uids_for_word_ids(right_word_ids, words_by_id),
+            spoken_source_start_us=_word_source_start_us(right_word_ids[0], words_by_id),
+            containing_video_segment_id=right_container_id,
+        ),
+    )
+
+
+def _is_ascii_label_word(text: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]{0,11}", str(text or "").strip()))
+
+
+def _caption_text_from_word_ids(word_ids: list[str], words_by_id: dict[str, object]) -> str:
+    return "".join(str(getattr(words_by_id[word_id], "text", "") or "") for word_id in word_ids if word_id in words_by_id)
+
+
+def _source_uids_for_word_ids(word_ids: list[str], words_by_id: dict[str, object]) -> list[str]:
+    result: list[str] = []
+    for word_id in word_ids:
+        word = words_by_id.get(word_id)
+        uid = str(getattr(word, "subtitle_uid", "") or "") if word is not None else ""
+        if uid and uid not in result:
+            result.append(uid)
+    return result
+
+
+def _word_target_start_us(caption: CaptionRenderUnit, word: object, words_by_id: dict[str, object]) -> int | None:
+    first_word = words_by_id.get(str(caption.word_ids[0])) if caption.word_ids else None
+    if first_word is None:
+        no_start: int | None = None
+        return no_start
+    spoken_start = int(caption.spoken_source_start_us or getattr(first_word, "source_start_us", 0) or 0)
+    source_delta = int(getattr(word, "source_start_us", 0) or 0) - spoken_start
+    return int(caption.target_start_us) + max(0, source_delta)
+
+
+def _word_source_start_us(word_id: str, words_by_id: dict[str, object]) -> int | None:
+    word = words_by_id.get(word_id)
+    if word is None:
+        no_start: int | None = None
+        return no_start
+    return int(getattr(word, "source_start_us", 0) or 0)
+
+
+def _word_source_end_us(word_id: str, words_by_id: dict[str, object]) -> int | None:
+    word = words_by_id.get(word_id)
+    if word is None:
+        no_end: int | None = None
+        return no_end
+    return int(getattr(word, "source_end_us", 0) or 0)
 
 
 def _caption_word_id_set(captions: list[CaptionRenderUnit]) -> set[str]:

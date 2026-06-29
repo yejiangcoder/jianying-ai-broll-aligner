@@ -13,6 +13,9 @@ from aroll_v21.quality.safe_boundary import trailing_word_ids_for_suffix_overlap
 from aroll_v21.quality.repeated_suffix_island import is_coordinated_parallel_suffix_repetition
 from aroll_v21.quality.visual_pacing.timeline_utils import _repack
 
+PREDICATE_CONTINUATION_STARTS = ("就", "会", "是", "永远", "可以", "能", "要", "应该", "必须", "只能", "才", "都", "也", "还")
+
+
 def _drop_repeated_suffix_islands_by_subtitle(
     segments: list[FinalTimelineSegment],
     source_graph: CanonicalSourceGraph,
@@ -21,8 +24,13 @@ def _drop_repeated_suffix_islands_by_subtitle(
     cleaned: list[FinalTimelineSegment] = []
     dropped_count = 0
     split_segment_count = 0
-    for segment in segments:
-        cleaned_segments, dropped_word_ids = _clean_segment_repeated_suffix_islands(segment, word_lookup)
+    for index, segment in enumerate(segments):
+        next_word_after_segment = _first_segment_word(segments[index + 1], word_lookup) if index + 1 < len(segments) else None
+        cleaned_segments, dropped_word_ids = _clean_segment_repeated_suffix_islands(
+            segment,
+            word_lookup,
+            next_word_after_segment=next_word_after_segment,
+        )
         dropped_count += len(dropped_word_ids)
         if dropped_word_ids and len(cleaned_segments) != 1:
             split_segment_count += len(cleaned_segments)
@@ -33,6 +41,8 @@ def _drop_repeated_suffix_islands_by_subtitle(
 def _clean_segment_repeated_suffix_islands(
     segment: FinalTimelineSegment,
     word_lookup: dict[str, Any],
+    *,
+    next_word_after_segment: Any | None = None,
 ) -> tuple[list[FinalTimelineSegment], list[str]]:
     words = [word_lookup[word_id] for word_id in segment.word_ids if word_id in word_lookup]
     if len(words) < 3:
@@ -47,7 +57,9 @@ def _clean_segment_repeated_suffix_islands(
         ) if word is not None else object()
         if group and key != group_key:
             tokens = [normalize_text(str(getattr(item, "text", "") or "")) for item in group]
-            drop_start = _repeated_suffix_island_start(tokens)
+            boundary_next_word = word if word is not None else next_word_after_segment
+            next_token = normalize_text(str(getattr(boundary_next_word, "text", "") or "")) if boundary_next_word is not None else ""
+            drop_start = _repeated_suffix_island_start(tokens, next_token=next_token)
             if drop_start is not None:
                 dropped_word_ids.update(str(getattr(item, "word_id")) for item in group[drop_start:])
             group = []
@@ -98,7 +110,15 @@ def _clean_segment_repeated_suffix_islands(
     return cleaned_segments, [word_id for word_id in segment.word_ids if word_id in dropped_word_ids]
 
 
-def _repeated_suffix_island_start(tokens: list[str]) -> int | None:
+def _first_segment_word(segment: FinalTimelineSegment, word_lookup: dict[str, Any]) -> Any | None:
+    for word_id in list(segment.word_ids or []):
+        if word_id in word_lookup:
+            return word_lookup[word_id]
+    no_word: Any | None = None
+    return no_word
+
+
+def _repeated_suffix_island_start(tokens: list[str], next_token: str = "") -> int | None:
     max_n = min(6, len(tokens) // 2)
     for n in range(max_n, 1, -1):
         suffix_start = len(tokens) - n
@@ -117,9 +137,33 @@ def _repeated_suffix_island_start(tokens: list[str]) -> int | None:
                 if token == suffix and start + 1 < len(tokens) - 1:
                     if is_coordinated_parallel_suffix_repetition(tokens, start, len(tokens) - 1, 1):
                         continue
+                    if _repeated_suffix_is_boundary_subject(tokens, len(tokens) - 1, next_token):
+                        continue
                     return len(tokens) - 1
     no_repeated_suffix_island = None
     return no_repeated_suffix_island
+
+
+def _repeated_suffix_is_boundary_subject(tokens: list[str], suffix_start: int, next_token: str) -> bool:
+    if suffix_start != len(tokens) - 1:
+        return False
+    suffix = normalize_text(tokens[suffix_start])
+    if not _looks_like_nominal_subject(suffix):
+        return False
+    following = normalize_text(next_token)
+    if not following:
+        return False
+    return any(following.startswith(prefix) or prefix.startswith(following) for prefix in PREDICATE_CONTINUATION_STARTS)
+
+
+def _looks_like_nominal_subject(text: str) -> bool:
+    if not (2 <= len(text) <= 6):
+        return False
+    if not all("\u4e00" <= char <= "\u9fff" for char in text):
+        return False
+    if text.endswith(("的", "地", "得", "了", "着", "过", "是", "就")):
+        return False
+    return True
 
 
 def _drop_boundary_suffix_prefix_overlaps(

@@ -389,6 +389,7 @@ class ReadOnlyValidators:
         candidates = list(report.get("final_target_repeat_candidates") or [])
         accepted = set(decision_plan.final_target_repeat_accepted_cluster_ids)
         unresolved = set(decision_plan.final_target_repeat_unresolved_cluster_ids)
+        protected_text_pairs = self._protected_final_target_text_pairs(decision_plan)
         accepted_count = 0
         semantic_unresolved_count = 0
         blocking_medium_count = 0
@@ -399,9 +400,13 @@ class ReadOnlyValidators:
             cluster_id = self._final_target_cluster_id(row)
             confidence = str(row.get("confidence") or "")
             resolution = ""
+            candidate_pair = self._final_target_candidate_text_pair(row)
             if cluster_id in accepted:
                 accepted_count += 1
                 resolution = "accepted_by_semantic_decision"
+            elif candidate_pair is not None and candidate_pair in protected_text_pairs:
+                accepted_count += 1
+                resolution = "accepted_by_protected_semantic_bridge"
             elif cluster_id in unresolved:
                 semantic_unresolved_count += 1
                 resolution = "semantic_unresolved_write_blocker"
@@ -433,6 +438,50 @@ class ReadOnlyValidators:
     def _final_target_cluster_id(self, candidate: dict[str, Any]) -> str:
         raw = str(candidate.get("cluster_id") or "")
         return raw if raw.startswith("final_target_repeat_") else f"final_target_repeat_{raw}"
+
+    def _protected_final_target_text_pairs(self, decision_plan: DecisionPlan) -> set[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for row in decision_plan.decision_trace:
+            if not isinstance(row, dict):
+                continue
+            if row.get("route") != "final_target_repeat":
+                continue
+            if row.get("decision") != "keep_all_protected_semantic_bridge":
+                continue
+            pair = self._text_pair_from_row(row)
+            if pair is None:
+                continue
+            pairs.add(pair)
+            pairs.add((pair[1], pair[0]))
+        return pairs
+
+    def _final_target_candidate_text_pair(self, candidate: dict[str, Any]) -> tuple[str, str] | None:
+        items = [row for row in list(candidate.get("items") or []) if isinstance(row, dict)]
+        if len(items) >= 2:
+            left = normalize_text(str(items[0].get("text") or ""))
+            right = normalize_text(str(items[1].get("text") or ""))
+        else:
+            candidates = [row for row in list(candidate.get("candidates") or []) if isinstance(row, dict)]
+            if len(candidates) < 2:
+                no_pair: tuple[str, str] | None = None
+                return no_pair
+            left = normalize_text(str(candidates[0].get("text") or ""))
+            right = normalize_text(str(candidates[1].get("text") or ""))
+        if not left or not right:
+            no_pair: tuple[str, str] | None = None
+            return no_pair
+        return left, right
+
+    def _text_pair_from_row(self, row: dict[str, Any]) -> tuple[str, str] | None:
+        text_pair = [normalize_text(str(value or "")) for value in list(row.get("text_pair") or [])]
+        if len(text_pair) >= 2 and text_pair[0] and text_pair[1]:
+            return text_pair[0], text_pair[1]
+        left = normalize_text(str(row.get("left_text") or ""))
+        right = normalize_text(str(row.get("right_text") or ""))
+        if not left or not right:
+            no_pair: tuple[str, str] | None = None
+            return no_pair
+        return left, right
 
     def _modifier_redundancy_semantic_status(
         self,

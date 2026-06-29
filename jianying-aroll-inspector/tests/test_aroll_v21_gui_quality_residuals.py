@@ -131,6 +131,50 @@ class ArollV21GuiQualityResidualTests(unittest.TestCase):
         ]
         self.assertEqual(scan_requests, [])
 
+    def test_slot_parallel_enumeration_is_not_treated_as_self_repair(self) -> None:
+        gate = build_final_caption_visible_repeat_gate(
+            [
+                _caption(1, "扫描你的经济"),
+                _caption(2, "扫描你的地位"),
+                _caption(3, "看你能不能给她兜底"),
+                _caption(4, "看你能不能给她阶层跃迁的门票"),
+            ]
+        )
+
+        self.assertEqual(gate["self_repair_aborted_phrase_candidates"], [])
+        self.assertNotIn("V21_SELF_REPAIR_ABORTED_PHRASE_UNRESOLVED", gate["blocker_codes"])
+
+    def test_scan_slot_parallel_enumeration_survives_aroll_run(self) -> None:
+        report = ArollEngine().run(
+            _run_input(
+                [
+                    "那么扫描你的经济",
+                    "扫描你的地位",
+                    "看你能不能给她兜底",
+                    "看你能不能给她阶层跃迁的门票",
+                    "她要扫描你的骨相",
+                    "扫描你的皮相",
+                    "扫描你的身材",
+                    "扫描你的言行举止",
+                ]
+            )
+        )
+
+        final_text = "".join(segment.text for segment in report.final_timeline)
+        caption_text = "".join(caption.text for caption in report.captions)
+        for expected in (
+            "那么扫描你的经济",
+            "扫描你的地位",
+            "看你能不能给她兜底",
+            "看你能不能给她阶层跃迁的门票",
+            "她要扫描你的骨相",
+            "扫描你的皮相",
+            "扫描你的身材",
+            "扫描你的言行举止",
+        ):
+            self.assertIn(expected, final_text)
+            self.assertIn(expected, caption_text)
+
     def test_self_repair_requires_semantic_adjudication_when_ambiguous(self) -> None:
         gate = build_final_caption_visible_repeat_gate(
             [

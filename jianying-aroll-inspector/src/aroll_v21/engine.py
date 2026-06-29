@@ -26,6 +26,8 @@ from aroll_v21.decision.semantic_contracts import (
     SemanticAdjudicationMode,
     SemanticAdjudicationRequest,
     SemanticAdjudicationResult,
+    SemanticIssueSeverity,
+    SemanticIssueType,
     SemanticRoutingDecision,
     semantic_contract_to_dict,
 )
@@ -39,7 +41,7 @@ from aroll_v21.ir.models import Blocker, BlockerReport, RunReport
 from aroll_v21.quality import VisualPacingNormalizer
 from aroll_v21.quality.final_caption_visible_repeat import build_final_caption_visible_repeat_gate
 from aroll_v21.quality.final_visible_caption_repair import repair_final_visible_caption_issues
-from aroll_v21.quality.final_timeline_repair_apply import recompute_final_timeline_safe_handles
+from aroll_v21.quality.pipeline import QualityPipeline, QualityPipelineHooks
 from aroll_v21.quality.quality_audit import build_quality_snapshot, build_timeline_mutation
 from aroll_v21.quality.quality_gate import build_quality_gate_report
 from aroll_v21.quality.repeat_span_repair import self_repair_aborted_phrase_candidate
@@ -102,6 +104,47 @@ class ArollRunInput:
     mode: Literal["dry-run", "write", "verify-only"] = "dry-run"
 
 
+@dataclass(frozen=True)
+class _IngestStageResult:
+    source_graph: Any
+    blockers: list[Blocker]
+    blocked_report: RunReport | None = None
+
+
+@dataclass(frozen=True)
+class _DecisionStageResult:
+    repeat_clusters: Any
+    decision_plan: Any
+    blocked_report: RunReport | None = None
+
+
+@dataclass(frozen=True)
+class _CompileStageResult:
+    final_timeline: list[Any]
+    blocked_report: RunReport | None = None
+
+
+@dataclass(frozen=True)
+class _QualityStageResult:
+    final_timeline: list[Any]
+    captions: list[Any]
+    visual_pacing_report: dict[str, Any]
+    final_visible_repair_report: dict[str, Any]
+    quality_mutations: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _WriterStageResult:
+    material_write_plan: dict[str, Any]
+    blocked_report: RunReport | None = None
+
+
+@dataclass(frozen=True)
+class _ValidationStageResult:
+    validator_report: dict[str, Any]
+    validator_blockers: list[Blocker]
+
+
 class ArollEngine:
     def __init__(
         self,
@@ -133,6 +176,64 @@ class ArollEngine:
         self.visual_pacing = visual_pacing or VisualPacingNormalizer()
 
     def run(self, inputs: ArollRunInput) -> RunReport:
+        ingest_stage = self._run_ingest_stage(inputs)
+        if ingest_stage.blocked_report is not None:
+            return ingest_stage.blocked_report
+
+        source_graph = ingest_stage.source_graph
+        blockers = ingest_stage.blockers
+        decision_stage = self._run_decision_stage(source_graph, blockers)
+        if decision_stage.blocked_report is not None:
+            return decision_stage.blocked_report
+
+        repeat_clusters = decision_stage.repeat_clusters
+        decision_plan = decision_stage.decision_plan
+        compile_stage = self._run_compile_stage(source_graph, repeat_clusters, decision_plan, blockers)
+        if compile_stage.blocked_report is not None:
+            return compile_stage.blocked_report
+
+        quality_stage = self._run_quality_stage(
+            final_timeline=compile_stage.final_timeline,
+            source_graph=source_graph,
+            decision_plan=decision_plan,
+            blockers=blockers,
+        )
+        writer_stage = self._run_writer_stage(
+            source_graph=source_graph,
+            repeat_clusters=repeat_clusters,
+            decision_plan=decision_plan,
+            final_timeline=quality_stage.final_timeline,
+            captions=quality_stage.captions,
+            blockers=blockers,
+        )
+        if writer_stage.blocked_report is not None:
+            return writer_stage.blocked_report
+
+        validation_stage = self._run_validation_stage(
+            inputs=inputs,
+            source_graph=source_graph,
+            decision_plan=decision_plan,
+            final_timeline=quality_stage.final_timeline,
+            captions=quality_stage.captions,
+            material_write_plan=writer_stage.material_write_plan,
+            visual_pacing_report=quality_stage.visual_pacing_report,
+            final_visible_repair_report=quality_stage.final_visible_repair_report,
+            blockers=blockers,
+        )
+        return self._build_final_run_report(
+            inputs=inputs,
+            source_graph=source_graph,
+            repeat_clusters=repeat_clusters,
+            decision_plan=decision_plan,
+            final_timeline=quality_stage.final_timeline,
+            captions=quality_stage.captions,
+            material_write_plan=writer_stage.material_write_plan,
+            validator_report=validation_stage.validator_report,
+            validator_blockers=validation_stage.validator_blockers,
+            blockers=blockers,
+        )
+
+    def _run_ingest_stage(self, inputs: ArollRunInput) -> _IngestStageResult:
         source_graph = self.ingest.build_source_graph(
             draft_data=inputs.draft_data,
             word_timeline=inputs.word_timeline,
@@ -144,30 +245,40 @@ class ArollEngine:
         )
         blockers: list[Blocker] = list(inputs.ingest_blockers) + list(source_graph.invariant_report.blockers)
         fatal_ingest_blocker = any(blocker.severity == "fatal" for blocker in inputs.ingest_blockers)
+        blocked_report: RunReport | None = None
         if fatal_ingest_blocker or not source_graph.invariant_report.single_source_graph_ok:
-            return self._blocked(
+            blocked_report = self._blocked(
                 source_graph=source_graph,
                 blockers=blockers,
                 summary={"stage": "ingest", "ingest_metadata": inputs.ingest_metadata},
             )
+        return _IngestStageResult(source_graph=source_graph, blockers=blockers, blocked_report=blocked_report)
 
+    def _run_decision_stage(self, source_graph, blockers: list[Blocker]) -> _DecisionStageResult:
         repeat_clusters = self.evidence_builder.build(source_graph)
         decision_plan = self.decision_planner.plan(repeat_clusters)
         self._harden_modifier_redundancy_semantic_requests(decision_plan)
         self._refresh_semantic_adjudication_report(decision_plan)
+        blocked_report: RunReport | None = None
         if decision_plan.blocked:
             consistency_blockers = self._semantic_request_consistency_blockers(decision_plan, {})
             if consistency_blockers:
                 decision_plan.blockers.extend(consistency_blockers)
             blockers.extend(decision_plan.blockers)
-            return self._blocked(
+            blocked_report = self._blocked(
                 source_graph=source_graph,
                 repeat_clusters=repeat_clusters,
                 decision_plan=decision_plan,
                 blockers=blockers,
                 summary={"stage": "decision"},
             )
+        return _DecisionStageResult(
+            repeat_clusters=repeat_clusters,
+            decision_plan=decision_plan,
+            blocked_report=blocked_report,
+        )
 
+    def _run_compile_stage(self, source_graph, repeat_clusters, decision_plan, blockers: list[Blocker]) -> _CompileStageResult:
         pre_compile_decision_blocker_count = len(decision_plan.blockers)
         final_timeline, compiler_blockers = self.compiler.compile(source_graph, decision_plan)
         if self._route_final_target_repeat_semantic_requests(decision_plan):
@@ -178,9 +289,10 @@ class ArollEngine:
         self._refresh_semantic_adjudication_report(decision_plan)
         new_decision_blockers = decision_plan.blockers[pre_compile_decision_blocker_count:]
         blockers.extend(compiler_blockers)
+        blocked_report: RunReport | None = None
         if compiler_blockers or any(blocker.severity == "fatal" for blocker in new_decision_blockers):
             blockers.extend(decision_plan.blockers)
-            return self._blocked(
+            blocked_report = self._blocked(
                 source_graph=source_graph,
                 repeat_clusters=repeat_clusters,
                 decision_plan=decision_plan,
@@ -188,398 +300,62 @@ class ArollEngine:
                 blockers=blockers,
                 summary={"stage": "compiler"},
             )
+        return _CompileStageResult(final_timeline=final_timeline, blocked_report=blocked_report)
 
-        final_timeline = self._drop_deterministic_self_repair_aborted_segments(final_timeline, decision_plan)
-        quality_mutations: list[dict[str, Any]] = []
-        initial_visual_before_timeline = list(final_timeline)
-        initial_visual_before_captions = self.renderer.render(final_timeline, source_graph)
-        final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-        captions = self.renderer.render(final_timeline, source_graph)
-        self._record_quality_mutation(
-            quality_mutations,
-            phase="visual_pacing.initial",
-            rule_name="visual_pacing.normalize",
-            before_timeline=initial_visual_before_timeline,
-            before_captions=initial_visual_before_captions,
-            after_timeline=final_timeline,
-            after_captions=captions,
-            source_graph=source_graph,
-            action={"visual_pacing_executed": True},
-            after_visual_pacing_report=visual_pacing_report,
-            enforce_regression_guard=False,
-        )
-        before_final_target_cleanup_signature = self._final_timeline_state_signature(final_timeline)
-        before_final_target_cleanup_timeline = list(final_timeline)
-        before_final_target_cleanup_captions = list(captions)
-        final_timeline = self._drop_final_target_aborted_caption_restarts(final_timeline, captions, source_graph, decision_plan)
-        if self._final_timeline_state_signature(final_timeline) != before_final_target_cleanup_signature:
-            captions_after_final_target_cleanup = self.renderer.render(final_timeline, source_graph)
-            self._record_quality_mutation(
-                quality_mutations,
-                phase="final_target_cleanup.pre_repair",
-                rule_name="_drop_final_target_aborted_caption_restarts",
-                before_timeline=before_final_target_cleanup_timeline,
-                before_captions=before_final_target_cleanup_captions,
-                after_timeline=final_timeline,
-                after_captions=captions_after_final_target_cleanup,
-                source_graph=source_graph,
-                action={"cleanup": "drop_final_target_aborted_caption_restarts"},
-                enforce_regression_guard=False,
+    def _run_quality_stage(
+        self,
+        *,
+        final_timeline,
+        source_graph,
+        decision_plan,
+        blockers: list[Blocker],
+    ) -> _QualityStageResult:
+        result = QualityPipeline(
+            QualityPipelineHooks(
+                render_captions=lambda timeline, graph: self.renderer.render(timeline, graph),
+                visual_pacing_normalize=self.visual_pacing.normalize,
+                repair_final_visible_caption_issues=repair_final_visible_caption_issues,
+                drop_deterministic_self_repair_aborted_segments=self._drop_deterministic_self_repair_aborted_segments,
+                drop_final_target_aborted_caption_restarts=self._drop_final_target_aborted_caption_restarts,
+                record_quality_mutation=self._record_quality_mutation,
+                accept_pending_visual_pacing_recheck=self._accept_pending_visual_pacing_recheck,
+                combined_final_visible_repair_report=self._combined_final_visible_repair_report,
+                reconcile_late_final_target_repeat_semantics=self._reconcile_late_final_target_repeat_semantics,
+                quality_mutation_report_fields=self._quality_mutation_report_fields,
+                final_timeline_state_signature=self._final_timeline_state_signature,
+                final_visible_state_signature=self._final_visible_state_signature,
+                sync_semantic_gate_with_final_output=self._sync_semantic_gate_with_final_output,
+                refresh_semantic_adjudication_report=self._refresh_semantic_adjudication_report,
             )
-            before_cleanup_visual_timeline = list(final_timeline)
-            before_cleanup_visual_captions = list(captions_after_final_target_cleanup)
-            final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-            captions = self.renderer.render(final_timeline, source_graph)
-            self._record_quality_mutation(
-                quality_mutations,
-                phase="visual_pacing.after_final_target_cleanup",
-                rule_name="visual_pacing.normalize",
-                before_timeline=before_cleanup_visual_timeline,
-                before_captions=before_cleanup_visual_captions,
-                after_timeline=final_timeline,
-                after_captions=captions,
-                source_graph=source_graph,
-                action={"visual_pacing_executed": True},
-                after_visual_pacing_report=visual_pacing_report,
-                enforce_regression_guard=False,
-            )
-        final_visible_repair_reports: list[dict[str, Any]] = []
-        visual_pacing_rerun_after_final_repair_count = 0
-        final_visible_repair_max_cycle_exhausted = False
-        final_visible_repair_cycle_stop_reason = ""
-        seen_final_visible_cycle_signatures: set[tuple[Any, ...]] = {
-            self._final_visible_state_signature(final_timeline, captions)
-        }
-        max_final_visible_repair_cycles = 8
-        for cycle_index in range(max_final_visible_repair_cycles):
-            state_before_repair = self._final_visible_state_signature(final_timeline, captions)
-            seen_final_visible_cycle_signatures.add(state_before_repair)
-            timeline_before_repair = list(final_timeline)
-            captions_before_repair = list(captions)
-            final_visible_repair = repair_final_visible_caption_issues(
-                final_timeline=final_timeline,
-                captions=captions,
-                source_graph=source_graph,
-                render_captions=lambda timeline: self.renderer.render(timeline, source_graph),
-            )
-            final_visible_repair_reports.append(final_visible_repair.report)
-            final_timeline = final_visible_repair.final_timeline
-            captions = final_visible_repair.captions
-            state_after_repair = self._final_visible_state_signature(final_timeline, captions)
-            repair_action_count = int(final_visible_repair.report.get("final_visible_repair_action_count") or 0)
-            repair_mutation = self._record_quality_mutation(
-                quality_mutations,
-                phase="final_visible_repair.cycle",
-                rule_name="repair_final_visible_caption_issues",
-                before_timeline=timeline_before_repair,
-                before_captions=captions_before_repair,
-                after_timeline=final_timeline,
-                after_captions=captions,
-                source_graph=source_graph,
-                action={
-                    "cycle_index": cycle_index + 1,
-                    "action_count": repair_action_count,
-                    "stop_reason": str(final_visible_repair.report.get("final_visible_repair_stop_reason") or ""),
-                },
-            )
-            self._accept_pending_visual_pacing_recheck(repair_mutation)
-            if repair_mutation is not None and not bool(repair_mutation.get("accepted")):
-                final_visible_repair_max_cycle_exhausted = True
-                final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                break
-            if repair_action_count <= 0:
-                break
-            if state_after_repair in seen_final_visible_cycle_signatures:
-                final_visible_repair_max_cycle_exhausted = True
-                final_visible_repair_cycle_stop_reason = "repair_cycle_state_repeated"
-                break
-            seen_final_visible_cycle_signatures.add(state_after_repair)
-            if cycle_index + 1 >= max_final_visible_repair_cycles:
-                final_visible_repair_max_cycle_exhausted = True
-                final_visible_repair_cycle_stop_reason = "max_repair_cycles_exhausted"
-                break
-            timeline_before_pacing_signature = self._final_timeline_state_signature(final_timeline)
-            timeline_before_pacing = list(final_timeline)
-            captions_before_pacing = list(captions)
-            visual_pacing_report_before = dict(visual_pacing_report or {})
-            final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-            if self._final_timeline_state_signature(final_timeline) == timeline_before_pacing_signature:
-                captions = captions_before_pacing
-            else:
-                captions = self.renderer.render(final_timeline, source_graph)
-            visual_pacing_rerun_after_final_repair_count += 1
-            pacing_mutation = self._record_quality_mutation(
-                quality_mutations,
-                phase="visual_pacing.after_final_visible_repair",
-                rule_name="visual_pacing.normalize",
-                before_timeline=timeline_before_pacing,
-                before_captions=captions_before_pacing,
-                after_timeline=final_timeline,
-                after_captions=captions,
-                source_graph=source_graph,
-                action={"cycle_index": cycle_index + 1, "visual_pacing_executed": True},
-                after_visual_pacing_report=visual_pacing_report,
-            )
-            if pacing_mutation is not None and not bool(pacing_mutation.get("accepted")):
-                final_timeline = timeline_before_pacing
-                captions = captions_before_pacing
-                visual_pacing_report = visual_pacing_report_before
-                final_visible_repair_cycle_stop_reason = "visual_pacing_regression_reverted_after_final_visible_repair"
-                break
-            state_after_pacing = self._final_visible_state_signature(final_timeline, captions)
-            if state_after_pacing != state_after_repair and state_after_pacing in seen_final_visible_cycle_signatures:
-                final_visible_repair_max_cycle_exhausted = True
-                final_visible_repair_cycle_stop_reason = "visual_pacing_reintroduced_seen_repair_state"
-                break
-            seen_final_visible_cycle_signatures.add(state_after_pacing)
-        final_visible_repair_report = self._combined_final_visible_repair_report(
-            final_visible_repair_reports,
-            visual_pacing_rerun_after_final_repair_count=visual_pacing_rerun_after_final_repair_count,
-            max_cycle_exhausted=final_visible_repair_max_cycle_exhausted,
-            cycle_stop_reason=final_visible_repair_cycle_stop_reason,
-            quality_mutations=quality_mutations,
-        )
-        if not final_visible_repair_max_cycle_exhausted:
-            before_post_repair_final_target_cleanup_signature = self._final_timeline_state_signature(final_timeline)
-            before_post_repair_final_target_cleanup_timeline = list(final_timeline)
-            before_post_repair_final_target_cleanup_captions = list(captions)
-            final_timeline = self._drop_final_target_aborted_caption_restarts(final_timeline, captions, source_graph, decision_plan)
-            if self._final_timeline_state_signature(final_timeline) != before_post_repair_final_target_cleanup_signature:
-                captions_after_post_repair_cleanup = self.renderer.render(final_timeline, source_graph)
-                cleanup_mutation = self._record_quality_mutation(
-                    quality_mutations,
-                    phase="post_cleanup.final_target_restart",
-                    rule_name="_drop_final_target_aborted_caption_restarts",
-                    before_timeline=before_post_repair_final_target_cleanup_timeline,
-                    before_captions=before_post_repair_final_target_cleanup_captions,
-                    after_timeline=final_timeline,
-                    after_captions=captions_after_post_repair_cleanup,
-                    source_graph=source_graph,
-                    action={"cleanup": "drop_final_target_aborted_caption_restarts"},
-                )
-                if cleanup_mutation is not None and not bool(cleanup_mutation.get("accepted")):
-                    final_visible_repair_max_cycle_exhausted = True
-                    final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                before_post_cleanup_visual_timeline = list(final_timeline)
-                before_post_cleanup_visual_captions = list(captions_after_post_repair_cleanup)
-                final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-                captions = self.renderer.render(final_timeline, source_graph)
-                visual_cleanup_mutation = self._record_quality_mutation(
-                    quality_mutations,
-                    phase="visual_pacing.post_cleanup",
-                    rule_name="visual_pacing.normalize",
-                    before_timeline=before_post_cleanup_visual_timeline,
-                    before_captions=before_post_cleanup_visual_captions,
-                    after_timeline=final_timeline,
-                    after_captions=captions,
-                    source_graph=source_graph,
-                    action={"visual_pacing_executed": True},
-                    after_visual_pacing_report=visual_pacing_report,
-                )
-                if visual_cleanup_mutation is not None and not bool(visual_cleanup_mutation.get("accepted")):
-                    final_visible_repair_max_cycle_exhausted = True
-                    final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                post_cleanup_state = self._final_visible_state_signature(final_timeline, captions)
-                if post_cleanup_state in seen_final_visible_cycle_signatures:
-                    final_visible_repair_max_cycle_exhausted = True
-                    final_visible_repair_cycle_stop_reason = "post_cleanup_reintroduced_seen_repair_state"
-                else:
-                    seen_final_visible_cycle_signatures.add(post_cleanup_state)
-                if final_visible_repair_max_cycle_exhausted:
-                    final_visible_repair_report = self._combined_final_visible_repair_report(
-                        final_visible_repair_reports,
-                        visual_pacing_rerun_after_final_repair_count=visual_pacing_rerun_after_final_repair_count,
-                        max_cycle_exhausted=final_visible_repair_max_cycle_exhausted,
-                        cycle_stop_reason=final_visible_repair_cycle_stop_reason,
-                        quality_mutations=quality_mutations,
-                    )
-                else:
-                    timeline_before_post_cleanup_repair = list(final_timeline)
-                    captions_before_post_cleanup_repair = list(captions)
-                    post_cleanup_repair = repair_final_visible_caption_issues(
-                        final_timeline=final_timeline,
-                        captions=captions,
-                        source_graph=source_graph,
-                        render_captions=lambda timeline: self.renderer.render(timeline, source_graph),
-                    )
-                    final_visible_repair_reports.append(post_cleanup_repair.report)
-                    final_timeline = post_cleanup_repair.final_timeline
-                    captions = post_cleanup_repair.captions
-                    post_cleanup_repair_action_count = int(
-                        post_cleanup_repair.report.get("final_visible_repair_action_count") or 0
-                    )
-                    post_cleanup_repair_mutation = self._record_quality_mutation(
-                        quality_mutations,
-                        phase="final_visible_repair.post_cleanup",
-                        rule_name="repair_final_visible_caption_issues",
-                        before_timeline=timeline_before_post_cleanup_repair,
-                        before_captions=captions_before_post_cleanup_repair,
-                        after_timeline=final_timeline,
-                        after_captions=captions,
-                        source_graph=source_graph,
-                        action={
-                            "action_count": post_cleanup_repair_action_count,
-                            "stop_reason": str(post_cleanup_repair.report.get("final_visible_repair_stop_reason") or ""),
-                        },
-                    )
-                    self._accept_pending_visual_pacing_recheck(post_cleanup_repair_mutation)
-                    if post_cleanup_repair_mutation is not None and not bool(post_cleanup_repair_mutation.get("accepted")):
-                        final_visible_repair_max_cycle_exhausted = True
-                        final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                    post_cleanup_repair_state = self._final_visible_state_signature(final_timeline, captions)
-                    if (
-                        not final_visible_repair_max_cycle_exhausted
-                        and post_cleanup_repair_action_count > 0
-                        and post_cleanup_repair_state in seen_final_visible_cycle_signatures
-                    ):
-                        final_visible_repair_max_cycle_exhausted = True
-                        final_visible_repair_cycle_stop_reason = "post_cleanup_repair_state_repeated"
-                    else:
-                        seen_final_visible_cycle_signatures.add(post_cleanup_repair_state)
-                    if not final_visible_repair_max_cycle_exhausted and post_cleanup_repair_action_count > 0:
-                        timeline_before_pacing_signature = self._final_timeline_state_signature(final_timeline)
-                        timeline_before_post_cleanup_pacing = list(final_timeline)
-                        state_before_post_cleanup_pacing = self._final_visible_state_signature(final_timeline, captions)
-                        captions_before_pacing = list(captions)
-                        final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-                        if self._final_timeline_state_signature(final_timeline) == timeline_before_pacing_signature:
-                            captions = captions_before_pacing
-                        else:
-                            captions = self.renderer.render(final_timeline, source_graph)
-                        visual_pacing_rerun_after_final_repair_count += 1
-                        post_cleanup_pacing_mutation = self._record_quality_mutation(
-                            quality_mutations,
-                            phase="visual_pacing.after_post_cleanup_repair",
-                            rule_name="visual_pacing.normalize",
-                            before_timeline=timeline_before_post_cleanup_pacing,
-                            before_captions=captions_before_pacing,
-                            after_timeline=final_timeline,
-                            after_captions=captions,
-                            source_graph=source_graph,
-                            action={"visual_pacing_executed": True},
-                            after_visual_pacing_report=visual_pacing_report,
-                        )
-                        if post_cleanup_pacing_mutation is not None and not bool(post_cleanup_pacing_mutation.get("accepted")):
-                            final_visible_repair_max_cycle_exhausted = True
-                            final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                        state_after_post_cleanup_pacing = self._final_visible_state_signature(final_timeline, captions)
-                        if (
-                            state_after_post_cleanup_pacing != state_before_post_cleanup_pacing
-                            and state_after_post_cleanup_pacing in seen_final_visible_cycle_signatures
-                        ):
-                            final_visible_repair_max_cycle_exhausted = True
-                            final_visible_repair_cycle_stop_reason = "post_cleanup_visual_pacing_reintroduced_seen_repair_state"
-                        else:
-                            seen_final_visible_cycle_signatures.add(state_after_post_cleanup_pacing)
-                    final_visible_repair_report = self._combined_final_visible_repair_report(
-                        final_visible_repair_reports,
-                        visual_pacing_rerun_after_final_repair_count=visual_pacing_rerun_after_final_repair_count,
-                        max_cycle_exhausted=final_visible_repair_max_cycle_exhausted,
-                        cycle_stop_reason=final_visible_repair_cycle_stop_reason,
-                        quality_mutations=quality_mutations,
-                    )
-        final_timeline, captions, late_final_target_blockers = self._reconcile_late_final_target_repeat_semantics(
-            final_timeline,
-            captions,
-            source_graph,
-            decision_plan,
-            quality_mutations,
-        )
-        blockers.extend(late_final_target_blockers)
-        if not final_visible_repair_max_cycle_exhausted:
-            late_final_visible_repair = repair_final_visible_caption_issues(
-                final_timeline=final_timeline,
-                captions=captions,
-                source_graph=source_graph,
-                render_captions=lambda timeline: self.renderer.render(timeline, source_graph),
-            )
-            late_repair_action_count = int(
-                late_final_visible_repair.report.get("final_visible_repair_action_count") or 0
-            )
-            if late_repair_action_count > 0:
-                timeline_before_late_repair = list(final_timeline)
-                captions_before_late_repair = list(captions)
-                final_visible_repair_reports.append(late_final_visible_repair.report)
-                final_timeline = late_final_visible_repair.final_timeline
-                captions = late_final_visible_repair.captions
-                late_repair_mutation = self._record_quality_mutation(
-                    quality_mutations,
-                    phase="final_visible_repair.after_late_semantic_reconcile",
-                    rule_name="repair_final_visible_caption_issues",
-                    before_timeline=timeline_before_late_repair,
-                    before_captions=captions_before_late_repair,
-                    after_timeline=final_timeline,
-                    after_captions=captions,
-                    source_graph=source_graph,
-                    action={
-                        "action_count": late_repair_action_count,
-                        "stop_reason": str(late_final_visible_repair.report.get("final_visible_repair_stop_reason") or ""),
-                    },
-                )
-                self._accept_pending_visual_pacing_recheck(late_repair_mutation)
-                if late_repair_mutation is not None and not bool(late_repair_mutation.get("accepted")):
-                    final_visible_repair_max_cycle_exhausted = True
-                    final_visible_repair_cycle_stop_reason = "quality_mutation_regression_detected"
-                if not final_visible_repair_max_cycle_exhausted:
-                    timeline_before_late_pacing_signature = self._final_timeline_state_signature(final_timeline)
-                    timeline_before_late_pacing = list(final_timeline)
-                    captions_before_late_pacing = list(captions)
-                    visual_pacing_report_before_late = dict(visual_pacing_report or {})
-                    final_timeline, visual_pacing_report = self.visual_pacing.normalize(final_timeline, source_graph)
-                    if self._final_timeline_state_signature(final_timeline) == timeline_before_late_pacing_signature:
-                        captions = captions_before_late_pacing
-                    else:
-                        captions = self.renderer.render(final_timeline, source_graph)
-                    visual_pacing_rerun_after_final_repair_count += 1
-                    late_pacing_mutation = self._record_quality_mutation(
-                        quality_mutations,
-                        phase="visual_pacing.after_late_semantic_reconcile_repair",
-                        rule_name="visual_pacing.normalize",
-                        before_timeline=timeline_before_late_pacing,
-                        before_captions=captions_before_late_pacing,
-                        after_timeline=final_timeline,
-                        after_captions=captions,
-                        source_graph=source_graph,
-                        action={"visual_pacing_executed": True},
-                        after_visual_pacing_report=visual_pacing_report,
-                    )
-                    if late_pacing_mutation is not None and not bool(late_pacing_mutation.get("accepted")):
-                        final_timeline = timeline_before_late_pacing
-                        captions = captions_before_late_pacing
-                        visual_pacing_report = visual_pacing_report_before_late
-                        final_visible_repair_cycle_stop_reason = (
-                            "visual_pacing_regression_reverted_after_late_semantic_reconcile_repair"
-                        )
-                final_visible_repair_report = self._combined_final_visible_repair_report(
-                    final_visible_repair_reports,
-                    visual_pacing_rerun_after_final_repair_count=visual_pacing_rerun_after_final_repair_count,
-                    max_cycle_exhausted=final_visible_repair_max_cycle_exhausted,
-                    cycle_stop_reason=final_visible_repair_cycle_stop_reason,
-                    quality_mutations=quality_mutations,
-                )
-        final_visible_repair_report.update(self._quality_mutation_report_fields(quality_mutations))
-        final_safe_handle_result = recompute_final_timeline_safe_handles(
+        ).run(
             final_timeline=final_timeline,
-            captions=captions,
             source_graph=source_graph,
-            render_captions=lambda timeline: self.renderer.render(timeline, source_graph),
-            pass_index=int(final_visible_repair_report.get("final_timeline_repair_intent_action_count") or 0) + 1,
+            decision_plan=decision_plan,
+            blockers=blockers,
         )
-        if final_safe_handle_result is not None:
-            final_timeline = final_safe_handle_result.final_timeline
-            captions = final_safe_handle_result.captions
-            engine_safe_actions = list(final_visible_repair_report.get("engine_final_timeline_repair_actions") or [])
-            engine_safe_actions.append(final_safe_handle_result.action)
-            final_visible_repair_report["engine_final_timeline_repair_actions"] = engine_safe_actions
-            final_visible_repair_report["engine_final_timeline_repair_action_count"] = len(engine_safe_actions)
-            final_visible_repair_report["engine_final_safe_handle_recompute_applied"] = True
-        self._sync_semantic_gate_with_final_output(decision_plan, final_timeline, captions)
-        self._refresh_semantic_adjudication_report(decision_plan)
-        blockers.extend(decision_plan.blockers)
+        return _QualityStageResult(
+            final_timeline=result.final_timeline,
+            captions=result.captions,
+            visual_pacing_report=result.visual_pacing_report,
+            final_visible_repair_report=result.final_visible_repair_report,
+            quality_mutations=result.quality_mutations,
+        )
+
+    def _run_writer_stage(
+        self,
+        *,
+        source_graph,
+        repeat_clusters,
+        decision_plan,
+        final_timeline,
+        captions,
+        blockers: list[Blocker],
+    ) -> _WriterStageResult:
         material_write_plan, writer_blockers = self.writer.build_write_plan(source_graph, captions)
         blockers.extend(writer_blockers)
+        blocked_report: RunReport | None = None
         if writer_blockers:
-            return self._blocked(
+            blocked_report = self._blocked(
                 source_graph=source_graph,
                 repeat_clusters=repeat_clusters,
                 decision_plan=decision_plan,
@@ -589,7 +365,21 @@ class ArollEngine:
                 blockers=blockers,
                 summary={"stage": "writer"},
             )
+        return _WriterStageResult(material_write_plan=material_write_plan, blocked_report=blocked_report)
 
+    def _run_validation_stage(
+        self,
+        *,
+        inputs: ArollRunInput,
+        source_graph,
+        decision_plan,
+        final_timeline,
+        captions,
+        material_write_plan: dict[str, Any],
+        visual_pacing_report: dict[str, Any],
+        final_visible_repair_report: dict[str, Any],
+        blockers: list[Blocker],
+    ) -> _ValidationStageResult:
         validator_report = self.validators.run(
             source_graph=source_graph,
             decision_plan=decision_plan,
@@ -602,6 +392,12 @@ class ArollEngine:
         )
         validator_report["final_visible_caption_repair_report"] = final_visible_repair_report
         validator_report = self._attach_final_caption_visible_repeat_gate(validator_report, captions)
+        final_visible_semantic_changed = self._merge_final_visible_repeat_semantic_requests(decision_plan, validator_report)
+        if self._route_final_visible_repeat_semantic_requests(decision_plan):
+            final_visible_semantic_changed = True
+        if final_visible_semantic_changed:
+            self._refresh_semantic_adjudication_report(decision_plan)
+            self._refresh_validator_semantic_gate_after_request_merge(validator_report, decision_plan)
         consistency_blockers = self._semantic_request_consistency_blockers(decision_plan, validator_report)
         if consistency_blockers:
             blockers.extend(consistency_blockers)
@@ -610,7 +406,22 @@ class ArollEngine:
         if not validator_report.get("validator_report_ok"):
             validator_blockers = self._validator_blockers(validator_report)
             blockers.extend(validator_blockers)
+        return _ValidationStageResult(validator_report=validator_report, validator_blockers=validator_blockers)
 
+    def _build_final_run_report(
+        self,
+        *,
+        inputs: ArollRunInput,
+        source_graph,
+        repeat_clusters,
+        decision_plan,
+        final_timeline,
+        captions,
+        material_write_plan: dict[str, Any],
+        validator_report: dict[str, Any],
+        validator_blockers: list[Blocker],
+        blockers: list[Blocker],
+    ) -> RunReport:
         blocking_blockers = [blocker for blocker in blockers if blocker.severity == "fatal" or (inputs.mode == "write" and blocker.severity == "write_blocker")]
         semantic_write_allowed = bool(decision_plan.semantic_unresolved_count == 0 and decision_plan.write_allowed)
         semantic_adjudication_report = decision_plan.semantic_adjudication_report or {}
@@ -1251,6 +1062,7 @@ class ArollEngine:
             str(payload.get("issue_id") or payload.get("cluster_id") or "")
             for payload in decision_plan.semantic_request_payloads
             if isinstance(payload, dict) and str(payload.get("issue_id") or payload.get("cluster_id") or "")
+            and not bool(payload.get("warning_only"))
         }
         provider_required_ids = {
             str(row.get("issue_id") or "")
@@ -1318,6 +1130,7 @@ class ArollEngine:
             fatal_semantic_issue_count = max(fatal_semantic_issue_count, len(unresolved_ids) or 1)
         semantic_request_count = max(int(report.get("semantic_request_count") or 0), len(requests_by_id))
         semantic_request_unresolved_count = len(unresolved_ids)
+        final_visible_repeat_advisory_report = self._final_visible_repeat_advisory_report(decision_plan, report)
         gate_passed = (
             semantic_request_unresolved_count == 0
             and fatal_semantic_issue_count == 0
@@ -1361,10 +1174,388 @@ class ArollEngine:
                 "unresolved_issue_ids": sorted(unresolved_ids),
                 "blocker_codes": sorted(set(str(code) for code in blocker_codes if str(code))),
                 "requests": [requests_by_id[key] for key in sorted(requests_by_id)],
+                **final_visible_repeat_advisory_report,
             }
         )
         decision_plan.semantic_adjudication_report.clear()
         decision_plan.semantic_adjudication_report.update(report)
+
+    def _final_visible_repeat_advisory_report(self, decision_plan, report: dict[str, Any]) -> dict[str, Any]:
+        rows = [
+            dict(row)
+            for row in decision_plan.semantic_decision_rows
+            if isinstance(row, dict) and str(row.get("_decision_kind") or "") == "advisory_final_visible_repeat"
+        ]
+        result_rows = [
+            dict(row)
+            for row in report.get("results") or []
+            if isinstance(row, dict) and self._semantic_result_is_final_visible_repeat(row)
+        ]
+        decision_counts: dict[str, int] = {}
+        for row in rows:
+            decision = str(row.get("decision") or row.get("_semantic_json_decision") or "")
+            if not decision:
+                continue
+            decision_counts[decision] = int(decision_counts.get(decision, 0)) + 1
+        unresolved_count = 0
+        review_count = 0
+        for row in result_rows:
+            blocker_code = str(row.get("blocker_code") or "")
+            decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+            decision_value = str(decision.get("decision") or "")
+            if blocker_code:
+                unresolved_count += 1
+            if decision_value in {SemanticAdjudicationDecisionType.NO_DECISION.value, SemanticAdjudicationDecisionType.REQUIRES_HUMAN_REVIEW.value}:
+                review_count += 1
+        drop_candidate_count = sum(
+            int(decision_counts.get(decision, 0))
+            for decision in (
+                SemanticAdjudicationDecisionType.DROP_LEFT.value,
+                SemanticAdjudicationDecisionType.DROP_RIGHT.value,
+                SemanticAdjudicationDecisionType.DROP_RECOMMENDED.value,
+                SemanticAdjudicationDecisionType.DROP_ABORTED.value,
+            )
+        )
+        applied_count = sum(1 for row in rows if bool(row.get("applied")))
+        provider_called_count = int(report.get("final_visible_repeat_deepseek_provider_called_count") or 0)
+        return {
+            "final_visible_repeat_advisory_count": len(rows),
+            "final_visible_repeat_advisory_result_count": len(result_rows),
+            "final_visible_repeat_advisory_decision_counts": dict(sorted(decision_counts.items())),
+            "final_visible_repeat_advisory_keep_count": int(decision_counts.get(SemanticAdjudicationDecisionType.KEEP_ALL.value, 0)),
+            "final_visible_repeat_advisory_drop_candidate_count": drop_candidate_count,
+            "final_visible_repeat_advisory_review_count": review_count,
+            "final_visible_repeat_advisory_unresolved_count": unresolved_count,
+            "final_visible_repeat_advisory_applied_count": applied_count,
+            "final_visible_repeat_advisory_provider_called_count": provider_called_count,
+            "final_visible_repeat_advisory_policy": "advisory_only_no_timeline_mutation",
+            "final_visible_repeat_advisory_rows": rows,
+        }
+
+    def _semantic_result_is_final_visible_repeat(self, row: dict[str, Any]) -> bool:
+        request = row.get("request") if isinstance(row.get("request"), dict) else {}
+        local_context = request.get("local_context") if isinstance(request.get("local_context"), dict) else {}
+        return str(local_context.get("cluster_type") or request.get("cluster_type") or "") == "final_visible_ambiguous_repeat"
+
+    def _merge_final_visible_repeat_semantic_requests(self, decision_plan, validator_report: dict[str, Any]) -> bool:
+        visible_gate = validator_report.get("final_caption_visible_repeat_gate") if isinstance(validator_report, dict) else {}
+        if not isinstance(visible_gate, dict):
+            return False
+        payloads = [row for row in visible_gate.get("repeat_semantic_arbitration_request_payloads") or [] if isinstance(row, dict)]
+        if not payloads:
+            return False
+        existing_ids = {
+            str(payload.get("issue_id") or payload.get("cluster_id") or "")
+            for payload in decision_plan.semantic_request_payloads
+            if isinstance(payload, dict)
+        }
+        added = False
+        for payload in payloads:
+            issue_id = str(payload.get("issue_id") or payload.get("cluster_id") or "")
+            if not issue_id or issue_id in existing_ids:
+                continue
+            row = dict(payload)
+            row["issue_id"] = issue_id
+            row["cluster_id"] = issue_id
+            row["warning_only"] = True
+            row["provider_required"] = False
+            row["source"] = "final_caption_visible_repeat_gate"
+            row["semantic_arbitration_mode"] = "request_only"
+            decision_plan.semantic_request_payloads.append(row)
+            decision_plan.decision_trace.append(
+                {
+                    "route": "semantic_warning",
+                    "cluster_id": issue_id,
+                    "decision": "final_visible_repeat_semantic_request_payload_emitted",
+                    "reason": "final-visible repeat candidate is ambiguous but non-blocking; payload emitted for semantic arbitration",
+                    "requires_semantic_decision": True,
+                    "warning_only": True,
+                }
+            )
+            existing_ids.add(issue_id)
+            added = True
+        return added
+
+    def _route_final_visible_repeat_semantic_requests(self, decision_plan) -> bool:
+        semantic_mode = self.decision_planner.semantic_mode
+        if semantic_mode not in {SemanticAdjudicationMode.AUTO, SemanticAdjudicationMode.DEEPSEEK}:
+            return False
+        payloads = self._pending_final_visible_repeat_payloads(decision_plan)
+        if not payloads:
+            return False
+        requests = [self._request_from_final_visible_repeat_payload(payload) for payload in payloads]
+        routes = [
+            self.decision_planner.issue_router.route_request(
+                request,
+                deterministic_action_available=False,
+                local_action="final_visible_repeat_semantic_arbitration",
+            )
+            for request in requests
+        ]
+        self._merge_semantic_routes(decision_plan, routes)
+        provider_requests = [
+            request
+            for request, route in zip(requests, routes)
+            if route.requires_provider
+        ]
+        provider = self._semantic_adjudication_provider()
+        if provider is None or not provider_requests:
+            return False
+        provider_called_before = int(getattr(provider, "provider_called_count", 0) or 0)
+        try:
+            decisions = list(provider.decide(provider_requests))
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            self._record_final_visible_provider_warning_error(
+                decision_plan,
+                provider_requests,
+                str(exc),
+                provider_called_before=provider_called_before,
+            )
+            return True
+        self._record_final_visible_provider_warning_metadata(
+            decision_plan,
+            provider,
+            provider_called_before=provider_called_before,
+        )
+        self._inject_final_visible_provider_advisory_decisions(decision_plan, provider_requests, decisions)
+        return True
+
+    def _pending_final_visible_repeat_payloads(self, decision_plan) -> list[dict[str, Any]]:
+        attempted_provider_ids = {
+            str(
+                row.get("issue_id")
+                or row.get("cluster_id")
+                or ((row.get("request") or {}).get("issue_id") if isinstance(row.get("request"), dict) else "")
+                or ((row.get("request") or {}).get("cluster_id") if isinstance(row.get("request"), dict) else "")
+                or ""
+            )
+            for row in (decision_plan.semantic_adjudication_report or {}).get("results") or []
+            if isinstance(row, dict)
+            and bool(row.get("provider_called"))
+            and str(
+                row.get("issue_id")
+                or row.get("cluster_id")
+                or ((row.get("request") or {}).get("issue_id") if isinstance(row.get("request"), dict) else "")
+                or ((row.get("request") or {}).get("cluster_id") if isinstance(row.get("request"), dict) else "")
+                or ""
+            )
+        }
+        pending: list[dict[str, Any]] = []
+        for payload in decision_plan.semantic_request_payloads:
+            if not isinstance(payload, dict):
+                continue
+            issue_id = str(payload.get("issue_id") or payload.get("cluster_id") or "")
+            if not issue_id or issue_id in attempted_provider_ids:
+                continue
+            if str(payload.get("cluster_type") or "") != "final_visible_ambiguous_repeat":
+                continue
+            if str(payload.get("source") or "") != "final_caption_visible_repeat_gate":
+                continue
+            if not bool(payload.get("warning_only")):
+                continue
+            pending.append(payload)
+        return pending
+
+    def _request_from_final_visible_repeat_payload(self, payload: dict[str, Any]) -> SemanticAdjudicationRequest:
+        issue_id = str(payload.get("issue_id") or payload.get("cluster_id") or "")
+        return SemanticAdjudicationRequest(
+            issue_id=issue_id,
+            issue_type=SemanticIssueType.AMBIGUOUS_REPEAT,
+            severity=SemanticIssueSeverity.MEDIUM,
+            candidate_segment_ids=[str(item) for item in payload.get("candidate_caption_ids") or [] if str(item)],
+            candidate_caption_ids=[str(item) for item in payload.get("candidate_caption_ids") or [] if str(item)],
+            word_ids=[str(item) for item in payload.get("word_ids") or [] if str(item)],
+            target_start_us=int(payload.get("target_start_us") or 0),
+            target_end_us=int(payload.get("target_end_us") or 0),
+            text_before=str(payload.get("left_text") or payload.get("text") or ""),
+            text_after=str(payload.get("right_text") or ""),
+            local_context=dict(payload.get("local_context") or {}),
+            recommended_action=str(payload.get("recommended_action") or "no_decision"),
+            why_local_policy_cannot_decide=str(payload.get("why_local_policy_cannot_decide") or ""),
+            allowed_decisions=[str(item) for item in payload.get("allowed_decisions") or [] if str(item)],
+        )
+
+    def _record_final_visible_provider_warning_metadata(
+        self,
+        decision_plan,
+        provider: Any,
+        *,
+        provider_called_before: int,
+    ) -> None:
+        provider_called_after = int(getattr(provider, "provider_called_count", provider_called_before) or 0)
+        delta = max(1, provider_called_after - int(provider_called_before or 0))
+        self._increment_deepseek_provider_called_count(decision_plan, delta)
+        report = decision_plan.semantic_adjudication_report
+        report["final_visible_repeat_deepseek_provider_called_count"] = int(
+            report.get("final_visible_repeat_deepseek_provider_called_count") or 0
+        ) + delta
+        report["final_visible_repeat_deepseek_provider_configured"] = True
+
+    def _record_final_visible_provider_warning_error(
+        self,
+        decision_plan,
+        requests: list[SemanticAdjudicationRequest],
+        error: str,
+        *,
+        provider_called_before: int,
+    ) -> None:
+        self._record_final_visible_provider_warning_metadata(
+            decision_plan,
+            self._semantic_adjudication_provider(),
+            provider_called_before=provider_called_before,
+        )
+        report = decision_plan.semantic_adjudication_report
+        report["final_visible_repeat_deepseek_provider_error"] = error
+        for request in requests:
+            self._append_semantic_result(
+                decision_plan,
+                request,
+                decision=None,
+                resolved=False,
+                blocker_code="FINAL_VISIBLE_REPEAT_PROVIDER_WARNING_FAILED",
+                message=error or "final-visible repeat semantic provider failed in warning-only mode",
+            )
+            decision_plan.decision_trace.append(
+                {
+                    "route": "final_visible_repeat",
+                    "cluster_id": request.issue_id,
+                    "decision": "provider_error_warning_only",
+                    "applied": False,
+                    "source": "deepseek_semantic_planner",
+                    "provider_called": True,
+                    "warning_only": True,
+                    "reason": error,
+                }
+            )
+
+    def _inject_final_visible_provider_advisory_decisions(
+        self,
+        decision_plan,
+        requests: list[SemanticAdjudicationRequest],
+        decisions: list[SemanticAdjudicationDecision],
+    ) -> None:
+        decisions_by_issue = {str(decision.issue_id or ""): decision for decision in decisions}
+        attempted_ids = {request.issue_id for request in requests}
+        for request in requests:
+            decision = decisions_by_issue.get(request.issue_id)
+            if decision is None:
+                self._append_semantic_result(
+                    decision_plan,
+                    request,
+                    decision=None,
+                    resolved=False,
+                    blocker_code="FINAL_VISIBLE_REPEAT_PROVIDER_WARNING_PARTIAL_RESPONSE",
+                    message="provider did not return a decision for this warning-only final-visible repeat request",
+                )
+                continue
+            forbidden = self._forbidden_provider_fields(semantic_contract_to_dict(decision))
+            if forbidden:
+                self._append_semantic_result(
+                    decision_plan,
+                    request,
+                    decision=decision,
+                    resolved=False,
+                    blocker_code="FINAL_VISIBLE_REPEAT_PROVIDER_FORBIDDEN_FIELDS",
+                    message="provider returned forbidden physical fields for warning-only final-visible repeat request",
+                )
+                decision_plan.decision_trace.append(
+                    {
+                        "route": "final_visible_repeat",
+                        "cluster_id": request.issue_id,
+                        "decision": "provider_forbidden_fields_warning_only",
+                        "applied": False,
+                        "source": "deepseek_semantic_planner",
+                        "provider_called": True,
+                        "warning_only": True,
+                        "forbidden_fields": forbidden,
+                    }
+                )
+                continue
+            resolved = decision.decision not in {
+                SemanticAdjudicationDecisionType.NO_DECISION,
+                SemanticAdjudicationDecisionType.REQUIRES_HUMAN_REVIEW,
+            } and not decision.requires_human_review
+            if resolved:
+                existing_ids = {
+                    str(row.get("cluster_id") or row.get("issue_id") or "")
+                    for row in decision_plan.semantic_decision_rows
+                    if isinstance(row, dict)
+                }
+                if request.issue_id not in existing_ids:
+                    decision_plan.semantic_decision_rows.append(
+                        {
+                            "decision_id": f"deepseek_final_visible_repeat_{request.issue_id}",
+                            "cluster_id": request.issue_id,
+                            "issue_type": request.issue_type.value,
+                            "cluster_type": "final_visible_ambiguous_repeat",
+                            "_decision_kind": "advisory_final_visible_repeat",
+                            "decision": decision.decision.value,
+                            "reason": decision.reason,
+                            "confidence": float(decision.confidence or 0.0),
+                            "requires_human_review": False,
+                            "applied": False,
+                            "_decision_source": "deepseek_semantic_planner",
+                            "_semantic_json_decision": decision.decision.value,
+                        }
+                    )
+            self._append_semantic_result(
+                decision_plan,
+                request,
+                decision=decision,
+                resolved=resolved,
+                blocker_code="" if resolved else "FINAL_VISIBLE_REPEAT_PROVIDER_WARNING_NO_DECISION",
+                message="" if resolved else (decision.reason or "provider returned no actionable warning-only decision"),
+            )
+            decision_plan.decision_trace.append(
+                {
+                    "route": "final_visible_repeat",
+                    "cluster_id": request.issue_id,
+                    "decision": decision.decision.value,
+                    "applied": False,
+                    "source": "deepseek_semantic_planner",
+                    "provider_called": True,
+                    "warning_only": True,
+                    "reason": decision.reason,
+                    "stage": "semantic_provider_advisory",
+                }
+            )
+        decision_plan.semantic_request_payloads[:] = [
+            payload
+            for payload in decision_plan.semantic_request_payloads
+            if str(payload.get("issue_id") or payload.get("cluster_id") or "") not in attempted_ids
+        ]
+
+    def _refresh_validator_semantic_gate_after_request_merge(self, validator_report: dict[str, Any], decision_plan) -> None:
+        semantic = dict(decision_plan.semantic_adjudication_report or {})
+        semantic_passed = bool(semantic.get("semantic_adjudication_gate_passed"))
+        semantic.update(
+            {
+                "semantic_final_review_validator_passed": semantic_passed,
+                "semantic_review_blocker_count": len([blocker for blocker in decision_plan.blockers if blocker.severity in {"fatal", "write_blocker"}]),
+                "semantic_unresolved_count": int(decision_plan.semantic_unresolved_count or 0),
+                "requires_human_review": bool(decision_plan.requires_human_review),
+                "write_allowed": semantic_passed,
+                "dry_run_continued_for_discovery": bool(decision_plan.dry_run_continued_for_discovery),
+            }
+        )
+        validator_report["semantic_final_review_validator"] = semantic
+        previous_quality = validator_report.get("quality_gate_report")
+        if not isinstance(previous_quality, dict):
+            return
+        base_ok = bool(previous_quality.get("ready_for_user_manual_qc_preconditions_passed", validator_report.get("validator_report_ok")))
+        quality_gate = build_quality_gate_report(
+            effective_speed_gate=_normalize_effective_speed_prewrite_placeholder(previous_quality.get("effective_speed_gate")),
+            final_repeat_convergence_gate=validator_report.get("final_repeat_convergence_gate"),
+            final_caption_visible_repeat_gate=validator_report.get("final_caption_visible_repeat_gate"),
+            semantic_adjudication_gate=semantic,
+            visual_pacing_gate=validator_report.get("visual_pacing_gate"),
+            caption_alignment_gate=validator_report.get("caption_alignment_gate"),
+            final_timeline_quality_guard_gate=validator_report.get("final_timeline_quality_guard_report"),
+            prewrite_projection_gate=validator_report.get("prewrite_projected_write_view"),
+            ready_for_user_manual_qc_preconditions_passed=base_ok and semantic_passed,
+        )
+        validator_report["quality_gate_report"] = quality_gate
+        validator_report["validator_report_ok"] = bool(validator_report.get("validator_report_ok")) and bool(quality_gate.get("gate_passed"))
 
     def _route_final_target_repeat_semantic_requests(self, decision_plan) -> bool:
         semantic_mode = self.decision_planner.semantic_mode

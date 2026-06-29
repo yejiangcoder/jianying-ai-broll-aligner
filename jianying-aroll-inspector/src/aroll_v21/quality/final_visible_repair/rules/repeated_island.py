@@ -18,6 +18,7 @@ MAX_HIGH_CONFIDENCE_MIDDLE_CJK_CHARS = 6
 MIN_AFTER_SECOND_CJK_CHARS = 2
 RESTART_PIVOT_SUFFIX_CHARS = frozenset("是有在要能会想把让给")
 NEGATION_MIDDLE_TEXTS = frozenset({"不", "没", "没有", "别"})
+LEADING_DISCOURSE_RESTART_PARTICLES = frozenset({"那", "这", "还", "就", "再", "又", "也", "都", "才"})
 DEFINITION_OR_EMPHASIS_MARKERS = (
     "就是",
     "叫做",
@@ -165,6 +166,7 @@ def _candidates_for_segment(
                     middle_text=middle_text,
                     after_second_text=after_second_text,
                     island_char_count=island_char_count,
+                    starts_at_segment_start=first_start == 0,
                 )
                 candidates.append(candidate)
                 seen_first_spans.add((first_start, first_end))
@@ -183,6 +185,7 @@ def _classify_candidate(
     middle_text: str,
     after_second_text: str,
     island_char_count: int,
+    starts_at_segment_start: bool = False,
 ) -> RepeatedIslandCandidate:
     risk_tags = _risk_tags(
         island_text=island_text,
@@ -195,6 +198,14 @@ def _classify_candidate(
     if "a_not_a_structure" in risk_tags:
         confidence = "low"
         reason = "protected_a_not_a_structure"
+    elif _is_leading_discourse_particle_restart(
+        island_text=island_text,
+        middle_text=middle_text,
+        after_second_text=after_second_text,
+        starts_at_segment_start=starts_at_segment_start,
+    ):
+        confidence = "high"
+        reason = "leading discourse particle A-B-A restart keeps the second particle pair and continuation"
     elif "single_char_island" in risk_tags:
         confidence = "low"
         reason = "single_character_repeat_is_not_safe_for_auto_repair"
@@ -248,6 +259,33 @@ def _risk_tags(
     if not _has_restart_pivot(island_text):
         tags.append("no_restart_pivot")
     return tags
+
+
+def _is_leading_discourse_particle_restart(
+    *,
+    island_text: str,
+    middle_text: str,
+    after_second_text: str,
+    starts_at_segment_start: bool,
+) -> bool:
+    island = normalize_text(island_text)
+    middle = normalize_text(middle_text)
+    after = normalize_text(after_second_text)
+    if not starts_at_segment_start:
+        return False
+    if _cjk_char_count(island) != 1 or _cjk_char_count(middle) != 1:
+        return False
+    if island not in LEADING_DISCOURSE_RESTART_PARTICLES or middle not in LEADING_DISCOURSE_RESTART_PARTICLES:
+        return False
+    if island == middle:
+        return False
+    if _cjk_char_count(after) < MIN_AFTER_SECOND_CJK_CHARS:
+        return False
+    if middle in NEGATION_MIDDLE_TEXTS:
+        return False
+    if _contains_definition_marker(after):
+        return False
+    return True
 
 
 def _dedupe_candidates(candidates: list[RepeatedIslandCandidate]) -> list[RepeatedIslandCandidate]:

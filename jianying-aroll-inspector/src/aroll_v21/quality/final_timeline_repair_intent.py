@@ -54,6 +54,8 @@ def _intents_for_candidate(
     candidate_type = str(candidate.get("type") or "")
     if candidate_type == "short_restart_residue_island":
         return [_drop_restart_residue_intent(candidate, candidate_index)]
+    if candidate_type == "intra_sentence_pause_gap_exceeds_limit":
+        return [_split_intra_sentence_pause_gap_intent(candidate, candidate_index)]
     if candidate_type == "dangling_word_before_connector":
         return [_trim_dangling_connector_intent(candidate, candidate_index, lead_handle_by_segment)]
     if candidate_type == "caption_video_word_text_mismatch":
@@ -71,6 +73,8 @@ def _no_repair_intents_for_unsupported_candidate() -> list[dict[str, Any]]:
 
 def _drop_restart_residue_intent(candidate: dict[str, Any], candidate_index: int) -> dict[str, Any]:
     is_visual_gap_split = bool(candidate.get("is_visual_gap_split"))
+    semantic_safe_drop = bool(candidate.get("semantic_restart_residue_safe_drop"))
+    deterministic = is_visual_gap_split or semantic_safe_drop
     return _base_intent(
         candidate,
         candidate_index,
@@ -84,13 +88,49 @@ def _drop_restart_residue_intent(candidate: dict[str, Any], candidate_index: int
         expected_preserved_text=str(candidate.get("next_source_word_text") or ""),
         is_visual_gap_split=is_visual_gap_split,
         is_semantic_bridge=bool(candidate.get("is_semantic_bridge")),
-        safety_level="deterministic_candidate" if is_visual_gap_split else "review_candidate",
+        semantic_restart_residue_safe_drop=semantic_safe_drop,
+        semantic_restart_overlap_units=_string_list(candidate.get("semantic_restart_overlap_units")),
+        protected_semantic_structure=bool(candidate.get("protected_semantic_structure")),
+        safety_level="deterministic_candidate" if deterministic else "review_candidate",
         safe_cut_recompute_required=True,
         safety_checks=[
             "automatic drop requires visual-gap split evidence",
+            "semantic bridge auto drop requires multi-overlap evidence and no protected parallel structure",
             "target segment is a whole short source-word island",
             "neighboring source expression remains present after removal",
             "captions must be rendered from the remaining final timeline",
+        ],
+    )
+
+
+def _split_intra_sentence_pause_gap_intent(candidate: dict[str, Any], candidate_index: int) -> dict[str, Any]:
+    safe_split_available = bool(candidate.get("safe_split_available"))
+    return _base_intent(
+        candidate,
+        candidate_index,
+        intent_type="split_intra_sentence_pause_gap",
+        timeline_mutation="split_segment_at_word_boundary",
+        segment_id=str(candidate.get("segment_id") or ""),
+        word_ids=_string_list(candidate.get("word_ids")),
+        left_word_ids=_string_list(candidate.get("left_word_ids")),
+        right_word_ids=_string_list(candidate.get("right_word_ids")),
+        split_after_word_id=str(candidate.get("split_after_word_id") or ""),
+        split_before_word_id=str(candidate.get("split_before_word_id") or ""),
+        gap_us=int(candidate.get("gap_us") or 0),
+        max_allowed_gap_us=int(candidate.get("max_allowed_gap_us") or 0),
+        left_duration_us=int(candidate.get("left_duration_us") or 0),
+        right_duration_us=int(candidate.get("right_duration_us") or 0),
+        unselected_gap_word_ids=_string_list(candidate.get("unselected_gap_word_ids")),
+        unselected_gap_text=str(candidate.get("unselected_gap_text") or ""),
+        split_safety_reason=str(candidate.get("split_safety_reason") or ""),
+        safety_level="deterministic_candidate" if safe_split_available else "review_candidate",
+        safe_cut_recompute_required=True,
+        safety_checks=[
+            "split boundary must be between adjacent source words in one final segment",
+            "no unselected source words may exist inside the removed pause gap",
+            "both split sides must keep enough spoken duration",
+            "safe cut handles must be recomputed after segment split",
+            "captions must be rendered from the split final timeline",
         ],
     )
 

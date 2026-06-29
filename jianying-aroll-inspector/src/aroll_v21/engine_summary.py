@@ -228,6 +228,9 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
         "final_timeline_quality_guard_blocking_candidate_type_counts": dict(final_timeline_quality_guard.get("blocking_candidate_type_counts") or {}),
         "final_timeline_repair_intent_count": int(final_timeline_quality_guard.get("repair_intent_count") or 0),
         "final_timeline_repair_intent_type_counts": dict(final_timeline_quality_guard.get("repair_intent_type_counts") or {}),
+        "intra_sentence_pause_gap_candidate_count": int(final_timeline_quality_guard.get("intra_sentence_pause_gap_candidate_count") or 0),
+        "intra_sentence_pause_gap_max_us": int(final_timeline_quality_guard.get("intra_sentence_pause_gap_max_us") or 0),
+        "intra_sentence_pause_gap_threshold_us": int(final_timeline_quality_guard.get("intra_sentence_pause_gap_threshold_us") or 0),
         "semantic_adjudication_gate_passed": bool(
             quality_gate.get("semantic_adjudication_gate_passed", semantic_gate.get("semantic_adjudication_gate_passed"))
         ),
@@ -265,6 +268,21 @@ def build_run_summary(run_report: RunReport, *, commit_performed: bool = False, 
         "semantic_local_decision_count": semantic_local_decision_count,
         "semantic_provider_required_count": semantic_provider_required_count,
         "deterministic_baseline_refused_count": deterministic_baseline_refused_count,
+        "final_visible_repeat_advisory_count": semantic_int("final_visible_repeat_advisory_count"),
+        "final_visible_repeat_advisory_result_count": semantic_int("final_visible_repeat_advisory_result_count"),
+        "final_visible_repeat_advisory_decision_counts": dict(
+            semantic_report.get("final_visible_repeat_advisory_decision_counts")
+            or semantic_gate.get("final_visible_repeat_advisory_decision_counts")
+            or quality_gate.get("final_visible_repeat_advisory_decision_counts")
+            or {}
+        ),
+        "final_visible_repeat_advisory_keep_count": semantic_int("final_visible_repeat_advisory_keep_count"),
+        "final_visible_repeat_advisory_drop_candidate_count": semantic_int("final_visible_repeat_advisory_drop_candidate_count"),
+        "final_visible_repeat_advisory_review_count": semantic_int("final_visible_repeat_advisory_review_count"),
+        "final_visible_repeat_advisory_unresolved_count": semantic_int("final_visible_repeat_advisory_unresolved_count"),
+        "final_visible_repeat_advisory_applied_count": semantic_int("final_visible_repeat_advisory_applied_count"),
+        "final_visible_repeat_advisory_provider_called_count": semantic_int("final_visible_repeat_advisory_provider_called_count"),
+        "final_visible_repeat_advisory_policy": semantic_str("final_visible_repeat_advisory_policy"),
         "effective_speed_gate_passed": bool(effective_speed_passed_raw and effective_speed_has_bounds and not effective_speed_not_applicable),
         "effective_speed_not_applicable": effective_speed_not_applicable,
         "effective_speed_not_applicable_reason": str(

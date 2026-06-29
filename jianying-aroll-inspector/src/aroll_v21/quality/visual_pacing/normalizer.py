@@ -148,6 +148,17 @@ class VisualPacingNormalizer:
                 merged += cut_density_relief_merged_count
                 current = _repack(current)
             unsafe_attempts += cut_density_relief_unsafe_count
+        current, semantic_bridge_safe_merged_count, semantic_bridge_safe_unsafe_count = self._merge_safe_semantic_bridge_exceptions(
+            current,
+            source_graph,
+            windows,
+            word_lookup,
+        )
+        if semantic_bridge_safe_merged_count:
+            attempted += semantic_bridge_safe_merged_count
+            merged += semantic_bridge_safe_merged_count
+            current = _repack(current)
+        unsafe_attempts += semantic_bridge_safe_unsafe_count
         safety_report = _build_visual_merge_safety_report(
             current,
             source_graph,
@@ -387,6 +398,69 @@ class VisualPacingNormalizer:
                 return merge_index, unsafe_count
             if _unsafe_micro_merge_attempt(group):
                 unsafe_count += 1
+        no_merge_index = None
+        return no_merge_index, unsafe_count
+
+    def _merge_safe_semantic_bridge_exceptions(
+        self,
+        segments: list[FinalTimelineSegment],
+        source_graph: CanonicalSourceGraph,
+        windows: list[tuple[str, int, int]],
+        word_lookup: dict[str, Any],
+    ) -> tuple[list[FinalTimelineSegment], int, int]:
+        current = list(segments)
+        merged = 0
+        unsafe_count = 0
+        while True:
+            merge_index, iteration_unsafe_count = self._next_semantic_bridge_exception_merge_index(
+                current,
+                source_graph,
+                windows,
+                word_lookup,
+            )
+            unsafe_count += iteration_unsafe_count
+            if merge_index is None:
+                return current, merged, unsafe_count
+            current = _repack(self._merge_at(current, merge_index))
+            merged += 1
+
+    def _next_semantic_bridge_exception_merge_index(
+        self,
+        segments: list[FinalTimelineSegment],
+        source_graph: CanonicalSourceGraph,
+        windows: list[tuple[str, int, int]],
+        word_lookup: dict[str, Any],
+    ) -> tuple[int | None, int]:
+        unsafe_count = 0
+        for index, segment in enumerate(segments):
+            if not _is_allowed_semantic_bridge_exception(segment):
+                continue
+            if _is_visual_gap_split_bridge(segment):
+                continue
+            candidates = []
+            if index > 0:
+                candidates.append(index - 1)
+            if index + 1 < len(segments):
+                candidates.append(index)
+            for merge_index in sorted(candidates, key=lambda value: _duration(segments[value]) + _duration(segments[value + 1])):
+                left = segments[merge_index]
+                right = segments[merge_index + 1]
+                if _is_visual_gap_split_bridge(left) or _is_visual_gap_split_bridge(right):
+                    continue
+                if len(segments) < 10 and not _can_merge_across_subtitle_boundary(left, right, word_lookup):
+                    continue
+                group = _build_merge_group(
+                    left,
+                    right,
+                    source_graph,
+                    windows,
+                    word_lookup,
+                    video_segment_id=left.segment_id,
+                )
+                if group.merge_safe:
+                    return merge_index, unsafe_count
+                if _unsafe_micro_merge_attempt(group):
+                    unsafe_count += 1
         no_merge_index = None
         return no_merge_index, unsafe_count
 
